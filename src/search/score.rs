@@ -1,10 +1,8 @@
-use crate::text::compare_str;
+use crate::text::{compare_label, compare_str};
 
 const IMPORTANCE_WEIGHT: f32 = 0.1;
-const STR_WEIGHT: f32 = 0.9;
-const GEO_WEIGHT: f32 = 0.2;
+const GEO_DISTANCE_WEIGHT: f32 = 0.1;
 
-/// Score a candidate document against the query.
 pub struct Scorer<'a> {
     pub query: &'a str,
     pub query_tokens: &'a [&'a str],
@@ -18,57 +16,75 @@ impl<'a> Scorer<'a> {
             .get("importance")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0) as f32;
-        let name = doc.get("name").and_then(|v| v.as_str()).unwrap_or("");
 
-        // Best token-level text similarity
+        // Build the searchable label (name + postcode + city), mirroring addok's make_labels
+        let label = build_label(doc);
+
+        // 1. Full-label vs full-query bigram Dice (addok's compare_ngrams N=2)
+        let label_score = compare_label(self.query, &label);
+
+        // 2. Autocomplete distance (exact / prefix / contains) on the label
+        let auto_score = autocomplete_distance(self.query, &label);
+
+        // 3. Token-level fallback for short/partial queries
+        let name = doc.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let token_score = self
             .query_tokens
             .iter()
             .map(|q| compare_str(q, name))
             .fold(0.0f32, f32::max);
 
-        // Autocomplete distance: rewards exact/prefix/contains at the name level
-        let auto_score = autocomplete_distance(self.query, name);
+        let str_score = label_score.max(auto_score).max(token_score);
 
-        let str_score = token_score.max(auto_score);
+        // Addok formula: sum(scores) / sum(ceilings)
+        // Without geo: (str_score * 1.0 + importance * IMPORTANCE_WEIGHT) / (1.0 + IMPORTANCE_WEIGHT)
+        let mut score_sum = str_score + importance * IMPORTANCE_WEIGHT;
+        let mut ceil_sum = 1.0 + IMPORTANCE_WEIGHT;
 
-        // Base: text quality heavily weighted, importance lightly
-        let base = str_score * STR_WEIGHT + importance * IMPORTANCE_WEIGHT;
-
-        // With a geo hint, blend in geographic distance
         if let (Some(lat), Some(lon)) = (self.lat, self.lon) {
+            // With geo hint: str_score * 0.9, importance contribution * 0.1 (adjust_scores)
+            score_sum = str_score * 0.9 + importance * IMPORTANCE_WEIGHT * 0.1;
+            ceil_sum = 0.9 + IMPORTANCE_WEIGHT * 0.1;
+            // Add geo component
             let km = haversine_km(lat, lon, doc_lat, doc_lon);
-            let geo_score = km_to_score(km);
-            base * (1.0 - GEO_WEIGHT) + geo_score * GEO_WEIGHT
-        } else {
-            base
+            score_sum += km_to_score(km) * GEO_DISTANCE_WEIGHT;
+            ceil_sum += GEO_DISTANCE_WEIGHT;
         }
+
+        score_sum / ceil_sum
     }
 }
 
-/// Score query string against a document name for autocomplete quality.
-/// Returns 1.0 for exact match, 0.9 for prefix, 0.7 for contains, 0.0 otherwise.
-pub fn autocomplete_distance(query: &str, name: &str) -> f32 {
+/// Build a searchable label from a document, matching addok's make_labels output.
+/// Format: "{name} {postcode} {city}"
+fn build_label(doc: &serde_json::Value) -> String {
+    let name = doc.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let postcode = doc
+        .get("filters")
+        .and_then(|f| f.get("postcode"))
+        .and_then(|v| v.as_str());
+    let city = doc.get("city").and_then(|v| v.as_str());
+
+    match (postcode, city) {
+        (Some(p), Some(c)) => format!("{} {} {}", name, p, c),
+        (Some(p), None) => format!("{} {}", name, p),
+        (None, Some(c)) => format!("{} {}", name, c),
+        (None, None) => name.to_string(),
+    }
+}
+
+/// Exact / prefix / contains match of query against label.
+/// Returns 1.0 / 0.9 / 0.7 / 0.0.
+pub fn autocomplete_distance(query: &str, label: &str) -> f32 {
     let q = query.to_lowercase();
-    let n = name.to_lowercase();
-    if n == q {
-        1.0
-    } else if n.starts_with(&q) {
-        0.9
-    } else if n.contains(q.as_str()) {
-        0.7
-    } else {
-        0.0
-    }
+    let l = label.to_lowercase();
+    if l == q { 1.0 } else if l.starts_with(&q) { 0.9 } else if l.contains(q.as_str()) { 0.7 } else { 0.0 }
 }
 
-/// Convert km distance to a score in [0.0, 1.0].
-/// 0km=1.0, 50km≈0.5, 200km≈0.2
 pub fn km_to_score(km: f64) -> f32 {
     (1.0 / (1.0 + km / 50.0)) as f32
 }
 
-/// Haversine distance in km.
 pub fn haversine_km(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     const R: f64 = 6371.0;
     let dlat = (lat2 - lat1).to_radians();
@@ -113,5 +129,15 @@ mod tests {
     fn test_haversine_paris_lyon() {
         let km = haversine_km(48.8566, 2.3522, 45.7640, 4.8357);
         assert!(km > 390.0 && km < 420.0);
+    }
+
+    #[test]
+    fn test_compare_label_bigram() {
+        // Full label vs full query similarity
+        let score = compare_label(
+            "20 avenue des champs elysees paris",
+            "Avenue des Champs Elysees 75008 Paris",
+        );
+        assert!(score > 0.6, "score was {}", score);
     }
 }

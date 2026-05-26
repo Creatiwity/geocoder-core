@@ -68,3 +68,30 @@ mod tests {
         assert!(compare_str("marseile", "marseille") > 0.7);
     }
 }
+
+/// Bigram Dice coefficient on two normalized strings.
+/// Mirrors addok's compare_ngrams(label, query, N=2): 2|A∩B|/(|A|+|B|).
+/// Used for full-label vs full-query comparison.
+pub fn compare_label(query: &str, label: &str) -> f32 {
+    use super::normalize::normalize;
+    let q = normalize(query);
+    let l = normalize(label);
+    bigram_dice(&q, &l)
+}
+
+fn bigram_dice(a: &str, b: &str) -> f32 {
+    use std::collections::HashSet;
+    if a.len() < 2 || b.len() < 2 {
+        return 0.0;
+    }
+    // Pad with a single space each side, then collect char bigrams
+    let a_chars: Vec<char> = format!(" {} ", a).chars().collect();
+    let b_chars: Vec<char> = format!(" {} ", b).chars().collect();
+    let a_grams: HashSet<(char, char)> =
+        a_chars.windows(2).map(|w| (w[0], w[1])).collect();
+    let b_grams: HashSet<(char, char)> =
+        b_chars.windows(2).map(|w| (w[0], w[1])).collect();
+    let intersection = a_grams.intersection(&b_grams).count();
+    let total = a_grams.len() + b_grams.len();
+    if total == 0 { 0.0 } else { 2.0 * intersection as f32 / total as f32 }
+}
