@@ -17,9 +17,17 @@ const GEOHASH_PRECISION: usize = 7;
 /// Number of neighbor rings to expand when reverse geocoding has insufficient results.
 const MAX_REVERSE_RINGS: usize = 3;
 
+const MIN_QUERY_LEN: usize = 2;
+const MAX_QUERY_LEN: usize = 200;
+
 pub fn search(query: &str, opts: &SearchOpts, index: &Index) -> Vec<SearchResult> {
+    let trimmed = query.trim();
+    if trimmed.len() < MIN_QUERY_LEN || trimmed.len() > MAX_QUERY_LEN {
+        return vec![];
+    }
+
     let limit = opts.limit.unwrap_or(DEFAULT_LIMIT);
-    let classified = query::preprocess(query, index);
+    let classified = query::preprocess(trimmed, index);
 
     let candidates = collect::collect(&classified, index, limit, &opts.filters);
 
