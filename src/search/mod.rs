@@ -1,5 +1,6 @@
 pub mod collect;
 pub mod fuzzy;
+pub mod housenumber;
 pub mod query;
 pub mod score;
 
@@ -26,16 +27,29 @@ pub fn search(query: &str, opts: &SearchOpts, index: &Index) -> Vec<SearchResult
         classified.meaningful.iter().map(|(_, t)| t.normalized.as_str()).collect();
     let scorer = Scorer { query_tokens: &query_tokens, lat: opts.lat, lon: opts.lon };
 
+    let hn_query = classified.housenumbers.first().map(|t| t.text.as_str());
+
     let mut results: Vec<SearchResult> = candidates
         .into_iter()
         .filter_map(|(doc_id, _)| {
             let doc = index.get_document(doc_id)?;
-            let lat = doc.get("lat")?.as_f64()?;
-            let lon = doc.get("lon")?.as_f64()?;
+
+            // Try housenumber matching — overrides coordinates if found
+            let (lat, lon, matched_hn) = match hn_query
+                .and_then(|q| housenumber::match_housenumber(q, &doc))
+            {
+                Some((hn_lat, hn_lon, hn_num)) => (hn_lat, hn_lon, Some(hn_num)),
+                None => {
+                    let lat = doc.get("lat")?.as_f64()?;
+                    let lon = doc.get("lon")?.as_f64()?;
+                    (lat, lon, None)
+                }
+            };
+
             let score = scorer.score(&doc, lat, lon);
             let distance_km =
                 opts.lat.zip(opts.lon).map(|(la, lo)| haversine_km(la, lo, lat, lon));
-            Some(SearchResult { doc, score, matched_housenumber: None, distance_km })
+            Some(SearchResult { doc, score, matched_housenumber: matched_hn, distance_km })
         })
         .filter(|r| r.score >= MIN_SCORE)
         .collect();

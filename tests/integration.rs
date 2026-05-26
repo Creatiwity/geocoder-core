@@ -1,16 +1,20 @@
 use std::collections::HashMap;
 
-use geocoder_core::{Document, Geocoder, IndexBuilder, ReverseOpts, SearchOpts};
+use geocoder_core::{Document, HouseNumber, Geocoder, IndexBuilder, ReverseOpts, SearchOpts};
 use tempfile::NamedTempFile;
 
 fn sample_documents() -> Vec<Document> {
     vec![
         Document {
-            name: "15 rue de la Paix".to_string(),
+            name: "rue de la Paix".to_string(),
             lat: 48.8698,
             lon: 2.3310,
             importance: 0.8,
-            housenumbers: vec![],
+            housenumbers: vec![
+                HouseNumber { number: "15".to_string(), lat: 48.8700, lon: 2.3312 },
+                HouseNumber { number: "15bis".to_string(), lat: 48.8701, lon: 2.3313 },
+                HouseNumber { number: "17".to_string(), lat: 48.8702, lon: 2.3314 },
+            ],
             filters: HashMap::from([("type".to_string(), "street".to_string())]),
             extra: HashMap::new(),
         },
@@ -69,6 +73,53 @@ fn test_build_and_search() {
         "top result should be République, got: {}",
         results[0].doc["name"]
     );
+}
+
+#[test]
+fn test_synonym_long_to_short() {
+    let (_file, geocoder) = build_test_index();
+    // "avenue" → indexed as both "avenue" and "av"
+    // User queries "av champs" → should match "Avenue des Champs-Élysées"
+    let results = geocoder.search("av champs", SearchOpts::default());
+    assert!(!results.is_empty(), "synonym 'av' should match 'avenue'");
+    assert!(
+        results[0].doc["name"].as_str().unwrap().contains("Champs"),
+        "got: {}",
+        results[0].doc["name"]
+    );
+}
+
+#[test]
+fn test_synonym_short_to_long() {
+    let (_file, geocoder) = build_test_index();
+    // User queries "avenue champs" → "avenue" resolves to same token as "av"
+    let results = geocoder.search("avenue champs", SearchOpts::default());
+    assert!(!results.is_empty(), "synonym 'avenue' should match 'av'");
+    assert!(results[0].doc["name"].as_str().unwrap().contains("Champs"));
+}
+
+#[test]
+fn test_housenumber_match_coordinates() {
+    let (_file, geocoder) = build_test_index();
+    // "15 rue paix" should find the street AND use housenumber 15's coordinates
+    let results = geocoder.search("15 rue paix", SearchOpts::default());
+    assert!(!results.is_empty(), "should find rue de la Paix");
+    let top = &results[0];
+    assert_eq!(
+        top.matched_housenumber.as_deref(),
+        Some("15"),
+        "should have matched housenumber 15"
+    );
+    // Coordinates should be housenumber's, not street center
+    assert!((top.doc["lat"].as_f64().unwrap() - 48.8698).abs() < 0.001);
+}
+
+#[test]
+fn test_housenumber_prefix_match() {
+    let (_file, geocoder) = build_test_index();
+    let results = geocoder.search("15b rue paix", SearchOpts::default());
+    assert!(!results.is_empty());
+    assert_eq!(results[0].matched_housenumber.as_deref(), Some("15bis"));
 }
 
 #[test]

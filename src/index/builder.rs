@@ -9,7 +9,7 @@ use fst::MapBuilder;
 use roaring::RoaringBitmap;
 
 use crate::error::GeocoderError;
-use crate::text::{edge_ngrams, tokenize};
+use crate::text::{edge_ngrams, synonyms_for, tokenize};
 use crate::types::{DocId, Document, TokenId};
 
 use super::format::{SectionHeader, SectionKind, MAGIC, VERSION};
@@ -92,20 +92,12 @@ impl IndexBuilder {
                     if token.is_housenumber {
                         continue;
                     }
-                    let token_id = self.get_or_insert_token(&token.normalized);
-                    self.token_scores
-                        .entry(token_id)
-                        .or_default()
-                        .push((doc_id, score));
-                    doc_token_ids.push(token_id);
-
-                    // Edge n-grams for autocomplete
-                    for ngram in edge_ngrams(&token.normalized) {
-                        self.ngram_sets
-                            .entry(ngram)
-                            .or_default()
-                            .insert(token_id);
-                    }
+                    self.index_token_with_synonyms(
+                        &token.normalized,
+                        doc_id,
+                        score,
+                        &mut doc_token_ids,
+                    );
                 }
             }
         }
@@ -189,6 +181,28 @@ impl IndexBuilder {
 
         w.flush()?;
         Ok(())
+    }
+
+    /// Index a token and all its synonyms for `doc_id`, appending token IDs to `doc_token_ids`.
+    fn index_token_with_synonyms(
+        &mut self,
+        normalized: &str,
+        doc_id: DocId,
+        score: f32,
+        doc_token_ids: &mut Vec<TokenId>,
+    ) {
+        let mut forms: Vec<&str> = Vec::with_capacity(4);
+        forms.push(normalized);
+        forms.extend_from_slice(synonyms_for(normalized));
+
+        for form in forms {
+            let token_id = self.get_or_insert_token(form);
+            self.token_scores.entry(token_id).or_default().push((doc_id, score));
+            doc_token_ids.push(token_id);
+            for ngram in edge_ngrams(form) {
+                self.ngram_sets.entry(ngram).or_default().insert(token_id);
+            }
+        }
     }
 
     fn get_or_insert_token(&mut self, normalized: &str) -> TokenId {

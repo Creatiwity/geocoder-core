@@ -1,5 +1,5 @@
 use crate::index::store::Index;
-use crate::text::tokenize;
+use crate::text::{synonyms_for, tokenize};
 use crate::types::{Token, TokenId};
 
 const COMMON_THRESHOLD: usize = 10_000;
@@ -25,22 +25,38 @@ pub fn preprocess(raw: &str, index: &Index) -> ClassifiedQuery {
             housenumbers.push(token);
             continue;
         }
-        match index.token_fst.get(&token.normalized) {
+
+        // Try the token itself, then its synonyms
+        let token_id = resolve_token(&token.normalized, index);
+
+        match token_id {
             None => not_found.push(token),
-            Some(token_id) => {
-                let freq = index.token_frequency(token_id as u32);
+            Some(tid) => {
+                let freq = index.token_frequency(tid);
                 if freq >= COMMON_THRESHOLD {
-                    common.push((token_id as TokenId, token));
+                    common.push((tid, token));
                 } else {
-                    meaningful.push((token_id as TokenId, token));
+                    meaningful.push((tid, token));
                 }
             }
         }
     }
 
     let threshold = compute_threshold(meaningful.len());
-
     ClassifiedQuery { meaningful, common, housenumbers, not_found, threshold }
+}
+
+/// Look up a token in the FST. If not found, try its synonyms and return the first hit.
+fn resolve_token(normalized: &str, index: &Index) -> Option<TokenId> {
+    if let Some(id) = index.token_fst.get(normalized) {
+        return Some(id as TokenId);
+    }
+    for &syn in synonyms_for(normalized) {
+        if let Some(id) = index.token_fst.get(syn) {
+            return Some(id as TokenId);
+        }
+    }
+    None
 }
 
 fn compute_threshold(meaningful_count: usize) -> usize {
