@@ -88,6 +88,35 @@ pub fn collect(
         }
     }
 
+    // Phase 4: extrapolate via token pair relations when bucket is still empty
+    if bucket.candidates.is_empty() && !token_ids.is_empty() {
+        let mut related: Vec<TokenId> = token_ids
+            .iter()
+            .flat_map(|tid| {
+                index
+                    .pair_sets
+                    .get(tid)
+                    .map(|bm| bm.iter().collect::<Vec<_>>())
+                    .unwrap_or_default()
+            })
+            .collect();
+        related.sort_unstable();
+        related.dedup();
+
+        for related_tid in related {
+            let mut try_ids = token_ids.clone();
+            try_ids.push(related_tid);
+            let mut results = index.zinter_top_n(&try_ids, BUCKET_MAX);
+            if let Some(ref mask) = filter_mask {
+                results.retain(|(doc_id, _)| mask.contains(*doc_id));
+            }
+            bucket.candidates.extend(results);
+            if bucket.is_full(wanted) {
+                break;
+            }
+        }
+    }
+
     bucket.candidates
 }
 
