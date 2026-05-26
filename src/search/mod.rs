@@ -62,7 +62,7 @@ pub fn search(query: &str, opts: &SearchOpts, index: &Index) -> Vec<SearchResult
                 }
             };
 
-            let score = scorer.score(&doc, lat, lon);
+            let score = scorer.score(&doc, lat, lon, matched_hn.as_deref());
             let distance_km =
                 opts.lat.zip(opts.lon).map(|(la, lo)| haversine_km(la, lo, lat, lon));
             Some(SearchResult { doc, score, matched_housenumber: matched_hn, distance_km })
@@ -158,7 +158,7 @@ pub fn autocomplete(query: &str, opts: &SearchOpts, index: &Index) -> Vec<Search
                         (lat, lon, None)
                     }
                 };
-            let score = scorer.score(&doc, lat, lon);
+            let score = scorer.score(&doc, lat, lon, matched_hn.as_deref());
             let distance_km =
                 opts.lat.zip(opts.lon).map(|(la, lo)| haversine_km(la, lo, lat, lon));
             Some(SearchResult { doc, score, matched_housenumber: matched_hn, distance_km })

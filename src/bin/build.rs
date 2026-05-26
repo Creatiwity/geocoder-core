@@ -164,8 +164,9 @@ fn parse_bano_line(line: &str) -> Result<Document, serde_json::Error> {
 
     let mut extra: HashMap<String, serde_json::Value> = HashMap::new();
     // city / street: join multiple values with " / " so the index sees both names
-    if !bano.city.is_empty() {
-        extra.insert("city".to_string(), serde_json::Value::String(bano.city.join(" / ")));
+    // Store only the primary city name (first element); the rest are districts/aliases.
+    if let Some(first_city) = bano.city.into_iter().next() {
+        extra.insert("city".to_string(), serde_json::Value::String(first_city));
     }
     if !bano.street.is_empty() {
         extra.insert("street".to_string(), serde_json::Value::String(bano.street.join(" / ")));

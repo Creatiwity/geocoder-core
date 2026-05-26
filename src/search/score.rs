@@ -11,14 +11,18 @@ pub struct Scorer<'a> {
 }
 
 impl<'a> Scorer<'a> {
-    pub fn score(&self, doc: &serde_json::Value, doc_lat: f64, doc_lon: f64) -> f32 {
+    pub fn score(&self, doc: &serde_json::Value, doc_lat: f64, doc_lon: f64, matched_hn: Option<&str>) -> f32 {
         let importance = doc
             .get("importance")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0) as f32;
 
-        // Build the searchable label (name + postcode + city), mirroring addok's make_labels
-        let label = build_label(doc);
+        // Build the searchable label, mirroring addok's make_labels (prepend housenumber when matched)
+        let base_label = build_label(doc);
+        let label = match matched_hn {
+            Some(hn) => format!("{} {}", hn, base_label),
+            None => base_label,
+        };
 
         // 1. Full-label vs full-query bigram Dice (addok's compare_ngrams N=2)
         let label_score = compare_label(self.query, &label);
@@ -63,7 +67,7 @@ fn build_label(doc: &serde_json::Value) -> String {
         .get("filters")
         .and_then(|f| f.get("postcode"))
         .and_then(|v| v.as_str());
-    let city = doc.get("city").and_then(|v| v.as_str());
+    let city = doc.get("city").and_then(|v| v.as_str()).map(|c| c.split(" / ").next().unwrap_or(c));
 
     match (postcode, city) {
         (Some(p), Some(c)) => format!("{} {} {}", name, p, c),

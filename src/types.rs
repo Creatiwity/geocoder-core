@@ -54,10 +54,11 @@ impl SearchResult {
             parts.push(name.to_string());
         }
 
-        // City from extra fields or filters
+        // City from extra fields or filters — take only primary value (before " / ")
         let city = doc
             .get("city")
             .and_then(|v| v.as_str())
+            .map(|c| c.split(" / ").next().unwrap_or(c))
             .or_else(|| {
                 doc.get("filters")
                     .and_then(|f| f.get("city"))
