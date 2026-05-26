@@ -173,3 +173,29 @@ fn test_filter() {
         "poi"
     );
 }
+
+#[test]
+fn test_autocomplete_prefix() {
+    let (_file, geocoder) = build_test_index();
+    // "rep" is a prefix of "republique" — autocomplete should find République
+    let results = geocoder.autocomplete("rep", SearchOpts::default());
+    assert!(!results.is_empty(), "autocomplete 'rep' should find République");
+    assert!(
+        results[0].doc["name"].as_str().unwrap().contains("République"),
+        "got: {}",
+        results[0].doc["name"]
+    );
+}
+
+#[test]
+fn test_autocomplete_multiword() {
+    let (_file, geocoder) = build_test_index();
+    // "rue pai" — "rue" is complete, "pai" is a prefix of "paix"
+    let results = geocoder.autocomplete("rue pai", SearchOpts::default());
+    assert!(!results.is_empty(), "autocomplete 'rue pai' should find rue de la Paix");
+    assert!(
+        results[0].doc["name"].as_str().unwrap().contains("Paix"),
+        "got: {}",
+        results[0].doc["name"]
+    );
+}

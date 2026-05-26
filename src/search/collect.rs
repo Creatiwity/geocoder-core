@@ -134,7 +134,7 @@ fn build_common_mask(common_ids: &[TokenId], index: &Index) -> Option<RoaringBit
     if union.is_empty() { None } else { Some(union) }
 }
 
-fn build_filter_mask(
+pub fn build_filter_mask(
     filters: &HashMap<String, Vec<String>>,
     index: &Index,
 ) -> Option<RoaringBitmap> {

@@ -24,6 +24,10 @@ impl Geocoder {
         search::search(query, &opts, &self.index)
     }
 
+    pub fn autocomplete(&self, query: &str, opts: SearchOpts) -> Vec<SearchResult> {
+        search::autocomplete(query, &opts, &self.index)
+    }
+
     pub fn reverse(&self, lat: f64, lon: f64, opts: ReverseOpts) -> Vec<SearchResult> {
         search::reverse(lat, lon, &opts, &self.index)
     }
