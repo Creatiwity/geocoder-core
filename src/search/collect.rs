@@ -117,7 +117,12 @@ pub fn collect(
         }
     }
 
-    bucket.candidates
+    // Deduplicate: a doc_id can appear across multiple threshold passes; keep max score
+    let mut seen: HashMap<DocId, f32> = HashMap::new();
+    for (id, score) in bucket.candidates {
+        seen.entry(id).and_modify(|s| *s = s.max(score)).or_insert(score);
+    }
+    seen.into_iter().collect()
 }
 
 /// Build a union bitmap of all documents that contain at least one common token.

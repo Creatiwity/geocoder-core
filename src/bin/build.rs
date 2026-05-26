@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use flate2::read::GzDecoder;
 use geocoder_core::{Document, GeocoderError, HouseNumber, IndexBuilder};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 fn main() -> Result<(), GeocoderError> {
     let mut args = std::env::args().skip(1);
@@ -26,14 +26,12 @@ fn main() -> Result<(), GeocoderError> {
     let input = &positional[0];
     let output_path: PathBuf = positional[1].clone().into();
 
-    // Resolve format: explicit flag > extension/name sniffing
     let is_bano = match format.as_deref() {
         Some("bano") => true,
         Some("native") => false,
         _ => input.contains(".sjson") || input.contains("bano"),
     };
 
-    // Build a raw reader: HTTP stream or local file, decompressed if .gz
     let is_gz = input.ends_with(".gz");
     let raw: Box<dyn Read> = if input.starts_with("http://") || input.starts_with("https://") {
         eprintln!("streaming from {}...", input);
@@ -87,6 +85,25 @@ fn main() -> Result<(), GeocoderError> {
 
 // ── BANO format ──────────────────────────────────────────────────────────────
 
+/// Accepts either a bare string or an array of strings (BANO sends both for
+/// postcode/city when a street spans multiple municipalities).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StringOrVec {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl StringOrVec {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            StringOrVec::One(s) => vec![s],
+            StringOrVec::Many(v) => v,
+        }
+    }
+}
+
+
 #[derive(Deserialize)]
 struct BanoDoc {
     name: String,
@@ -96,8 +113,8 @@ struct BanoDoc {
     importance: f32,
     #[serde(rename = "type", default)]
     doc_type: String,
-    #[serde(default)]
-    postcode: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_opt_string_or_vec")]
+    postcode: Vec<String>,
     #[serde(default)]
     city: Option<String>,
     #[serde(default)]
@@ -108,6 +125,15 @@ struct BanoDoc {
     street: Option<String>,
     #[serde(default)]
     housenumbers: HashMap<String, BanoHn>,
+}
+
+fn deserialize_opt_string_or_vec<'de, D>(de: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // Field is optional: missing → empty vec, present → one or many
+    let opt = Option::<StringOrVec>::deserialize(de)?;
+    Ok(opt.map(|s| s.into_vec()).unwrap_or_default())
 }
 
 #[derive(Deserialize)]
@@ -129,8 +155,10 @@ fn parse_bano_line(line: &str) -> Result<Document, serde_json::Error> {
     if !bano.doc_type.is_empty() {
         filters.insert("type".to_string(), bano.doc_type);
     }
-    if let Some(p) = &bano.postcode {
-        filters.insert("postcode".to_string(), p.clone());
+    // When multiple postcodes, keep the first as the filter value.
+    // All values end up indexed via housenumber geohashes anyway.
+    if let Some(p) = bano.postcode.into_iter().next() {
+        filters.insert("postcode".to_string(), p);
     }
 
     let mut extra: HashMap<String, serde_json::Value> = HashMap::new();
