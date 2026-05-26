@@ -1,0 +1,25 @@
+[package]
+name = "geocoder-core"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "geocoder-build"
+path = "src/bin/build.rs"
+
+[dependencies]
+fst = { version = "0.4", features = ["levenshtein"] }
+roaring = "0.10"
+memmap2 = "0.9"
+unidecode = "0.3"
+geohash = "0.13"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+flate2 = "1.0"
+regex = "1.11"
+once_cell = "1.20"
+thiserror = "2.0"
+byteorder = "1.5"
+
+[dev-dependencies]
+tempfile = "3.14"
