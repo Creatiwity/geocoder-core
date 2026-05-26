@@ -29,7 +29,7 @@ pub fn collect(
     let token_ids: Vec<TokenId> = query.meaningful.iter().map(|(tid, _)| *tid).collect();
     let filter_mask = build_filter_mask(filters, index);
 
-    // Search with meaningful tokens, progressively relaxing threshold
+    // Phase 1: progressively relax from all tokens down to the 2/3 threshold
     if !token_ids.is_empty() {
         for min_tokens in (query.threshold..=token_ids.len()).rev() {
             let subset = &token_ids[..min_tokens];
@@ -40,6 +40,21 @@ pub fn collect(
             bucket.candidates.extend(results);
             if bucket.is_full(wanted) {
                 break;
+            }
+        }
+
+        // Phase 2: extend below threshold down to 1 token when still insufficient
+        if !bucket.is_full(wanted) && query.threshold > 1 {
+            for min_tokens in (1..query.threshold).rev() {
+                let subset = &token_ids[..min_tokens];
+                let mut results = index.zinter_top_n(subset, BUCKET_MAX);
+                if let Some(ref mask) = filter_mask {
+                    results.retain(|(doc_id, _)| mask.contains(*doc_id));
+                }
+                bucket.candidates.extend(results);
+                if bucket.is_full(wanted) {
+                    break;
+                }
             }
         }
     }
