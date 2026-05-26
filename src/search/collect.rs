@@ -44,6 +44,19 @@ pub fn collect(
         }
     }
 
+    // Use common tokens to narrow results when we have more than needed
+    if bucket.candidates.len() > wanted && !query.common.is_empty() {
+        let common_ids: Vec<TokenId> = query.common.iter().map(|(tid, _)| *tid).collect();
+        let common_mask = build_common_mask(&common_ids, index);
+        if let Some(ref mask) = common_mask {
+            let narrowed: Vec<_> =
+                bucket.candidates.iter().filter(|(id, _)| mask.contains(*id)).cloned().collect();
+            if narrowed.len() >= wanted {
+                bucket.candidates = narrowed;
+            }
+        }
+    }
+
     // Fuzzy fallback on first not-found token (runs also when meaningful is empty)
     if !bucket.is_full(wanted) {
         if let Some(first_not_found) = query.not_found.first() {
@@ -61,6 +74,20 @@ pub fn collect(
     }
 
     bucket.candidates
+}
+
+/// Build a union bitmap of all documents that contain at least one common token.
+/// Used as a secondary filter to narrow overflow results.
+fn build_common_mask(common_ids: &[TokenId], index: &Index) -> Option<RoaringBitmap> {
+    let mut union = RoaringBitmap::new();
+    for &tid in common_ids {
+        if let Some(entries) = index.token_scores.get(tid as usize) {
+            for (doc_id, _) in entries {
+                union.insert(*doc_id);
+            }
+        }
+    }
+    if union.is_empty() { None } else { Some(union) }
 }
 
 fn build_filter_mask(
