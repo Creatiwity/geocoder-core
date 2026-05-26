@@ -59,7 +59,8 @@ fn main() -> Result<(), GeocoderError> {
             match parse_bano_line(&line) {
                 Ok(d) => d,
                 Err(e) => {
-                    eprintln!("line {}: {}", line_no + 1, e);
+                    let preview = line.get(..120).unwrap_or(&line);
+                    eprintln!("line {}: {} | snippet: {}…", line_no + 1, e, preview);
                     continue;
                 }
             }
@@ -115,14 +116,14 @@ struct BanoDoc {
     doc_type: String,
     #[serde(default, deserialize_with = "deserialize_opt_string_or_vec")]
     postcode: Vec<String>,
-    #[serde(default)]
-    city: Option<String>,
-    #[serde(default)]
-    citycode: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_opt_string_or_vec")]
+    city: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_opt_string_or_vec")]
+    citycode: Vec<String>,
     #[serde(default)]
     id: Option<String>,
-    #[serde(default)]
-    street: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_opt_string_or_vec")]
+    street: Vec<String>,
     #[serde(default)]
     housenumbers: HashMap<String, BanoHn>,
 }
@@ -162,17 +163,18 @@ fn parse_bano_line(line: &str) -> Result<Document, serde_json::Error> {
     }
 
     let mut extra: HashMap<String, serde_json::Value> = HashMap::new();
-    if let Some(city) = bano.city {
-        extra.insert("city".to_string(), serde_json::Value::String(city));
+    // city / street: join multiple values with " / " so the index sees both names
+    if !bano.city.is_empty() {
+        extra.insert("city".to_string(), serde_json::Value::String(bano.city.join(" / ")));
     }
-    if let Some(street) = bano.street {
-        extra.insert("street".to_string(), serde_json::Value::String(street));
+    if !bano.street.is_empty() {
+        extra.insert("street".to_string(), serde_json::Value::String(bano.street.join(" / ")));
     }
     if let Some(id) = bano.id {
         extra.insert("id".to_string(), serde_json::Value::String(id));
     }
-    if let Some(cc) = bano.citycode {
-        extra.insert("citycode".to_string(), serde_json::Value::String(cc));
+    if !bano.citycode.is_empty() {
+        extra.insert("citycode".to_string(), serde_json::Value::String(bano.citycode.join(",")));
     }
 
     Ok(Document {
