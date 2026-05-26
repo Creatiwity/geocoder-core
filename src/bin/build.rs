@@ -9,7 +9,6 @@ use serde::Deserialize;
 fn main() -> Result<(), GeocoderError> {
     let mut args = std::env::args().skip(1);
 
-    // Parse optional --format flag
     let mut format: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
     while let Some(arg) = args.next() {
@@ -21,33 +20,34 @@ fn main() -> Result<(), GeocoderError> {
     }
 
     if positional.len() < 2 {
-        eprintln!("usage: geocoder-build [--format bano|native] <input.(ndjson|sjson)[.gz]> <output.bin>");
+        eprintln!("usage: geocoder-build [--format bano|native] <url|path> <output.bin>");
         std::process::exit(1);
     }
-    let input_path: PathBuf = positional[0].clone().into();
+    let input = &positional[0];
     let output_path: PathBuf = positional[1].clone().into();
 
-    // Detect format: explicit flag wins, otherwise sniff from extension
+    // Resolve format: explicit flag > extension/name sniffing
     let is_bano = match format.as_deref() {
         Some("bano") => true,
         Some("native") => false,
-        _ => {
-            let name = input_path.file_name().unwrap_or_default().to_string_lossy();
-            name.contains(".sjson") || name.contains("bano")
-        }
+        _ => input.contains(".sjson") || input.contains("bano"),
     };
 
-    // Open file, optionally decompressing gzip
-    let file = std::fs::File::open(&input_path)?;
-    let is_gz = input_path.extension().map(|e| e == "gz").unwrap_or(false);
-
-    let reader: Box<dyn Read> = if is_gz {
-        Box::new(GzDecoder::new(file))
+    // Build a raw reader: HTTP stream or local file, decompressed if .gz
+    let is_gz = input.ends_with(".gz");
+    let raw: Box<dyn Read> = if input.starts_with("http://") || input.starts_with("https://") {
+        eprintln!("streaming from {}...", input);
+        let response = ureq::get(input)
+            .call()
+            .map_err(|e| GeocoderError::Io(std::io::Error::other(e.to_string())))?;
+        Box::new(response.into_reader())
     } else {
-        Box::new(file)
+        Box::new(std::fs::File::open(input)?)
     };
 
+    let reader: Box<dyn Read> = if is_gz { Box::new(GzDecoder::new(raw)) } else { raw };
     let reader = BufReader::new(reader);
+
     let mut builder = IndexBuilder::new();
     let mut count = 0usize;
 
@@ -87,7 +87,6 @@ fn main() -> Result<(), GeocoderError> {
 
 // ── BANO format ──────────────────────────────────────────────────────────────
 
-/// Raw BANO / addok sjson document.
 #[derive(Deserialize)]
 struct BanoDoc {
     name: String,
@@ -105,10 +104,8 @@ struct BanoDoc {
     citycode: Option<String>,
     #[serde(default)]
     id: Option<String>,
-    /// Street name when the document is a housenumber entry
     #[serde(default)]
     street: Option<String>,
-    /// Dict housenumbers: number → {lat, lon}
     #[serde(default)]
     housenumbers: HashMap<String, BanoHn>,
 }
@@ -122,13 +119,12 @@ struct BanoHn {
 fn parse_bano_line(line: &str) -> Result<Document, serde_json::Error> {
     let bano: BanoDoc = serde_json::from_str(line)?;
 
-    let housenumbers: Vec<HouseNumber> = bano
+    let housenumbers = bano
         .housenumbers
         .into_iter()
         .map(|(number, hn)| HouseNumber { number, lat: hn.lat, lon: hn.lon })
         .collect();
 
-    // Fields that drive bitmap filtering
     let mut filters = HashMap::new();
     if !bano.doc_type.is_empty() {
         filters.insert("type".to_string(), bano.doc_type);
@@ -137,8 +133,6 @@ fn parse_bano_line(line: &str) -> Result<Document, serde_json::Error> {
         filters.insert("postcode".to_string(), p.clone());
     }
 
-    // city + street go into extra so the index builder picks them up via FIELD_BOOSTS.
-    // id + citycode are stored for context/label use only.
     let mut extra: HashMap<String, serde_json::Value> = HashMap::new();
     if let Some(city) = bano.city {
         extra.insert("city".to_string(), serde_json::Value::String(city));
