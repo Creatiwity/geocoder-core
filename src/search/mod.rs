@@ -31,9 +31,14 @@ pub fn search(query: &str, opts: &SearchOpts, index: &Index) -> Vec<SearchResult
 
     let candidates = collect::collect(&classified, index, limit, &opts.filters);
 
-    let query_tokens: Vec<&str> =
-        classified.meaningful.iter().map(|(_, t)| t.normalized.as_str()).collect();
-    let scorer = Scorer { query_tokens: &query_tokens, lat: opts.lat, lon: opts.lon };
+    // Include not_found tokens so fuzzy-matched results still get a text similarity score
+    let query_tokens: Vec<&str> = classified
+        .meaningful
+        .iter()
+        .map(|(_, t)| t.normalized.as_str())
+        .chain(classified.not_found.iter().map(|t| t.normalized.as_str()))
+        .collect();
+    let scorer = Scorer { query: trimmed, query_tokens: &query_tokens, lat: opts.lat, lon: opts.lon };
 
     let hn_query = classified.housenumbers.first().map(|t| t.text.as_str());
 
