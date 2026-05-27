@@ -3,8 +3,8 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use byteorder::{LittleEndian, WriteBytesExt};
-use flate2::write::ZlibEncoder;
 use flate2::Compression;
+use flate2::write::ZlibEncoder;
 use fst::MapBuilder;
 use roaring::RoaringBitmap;
 
@@ -12,9 +12,11 @@ use crate::error::GeocoderError;
 use crate::text::{edge_ngrams, synonyms_for, tokenize};
 use crate::types::{DocId, Document, TokenId};
 
-use super::format::{SectionHeader, SectionKind, MAGIC, VERSION};
+use super::format::{MAGIC, SectionHeader, SectionKind, VERSION};
 
 const FIELD_BOOSTS: &[(&str, f32)] = &[("name", 4.0), ("street", 1.0), ("city", 1.0)];
+
+#[derive(Default)]
 pub struct IndexBuilder {
     next_doc_id: DocId,
     next_token_id: TokenId,
@@ -60,13 +62,19 @@ impl IndexBuilder {
         self.doc_blobs.push((doc_id, encoder.finish()?));
 
         // Index geohash
-        let coord = geohash::Coord { x: doc.lon, y: doc.lat };
+        let coord = geohash::Coord {
+            x: doc.lon,
+            y: doc.lat,
+        };
         let gh = geohash::encode(coord, 7)?;
         self.geohash_sets.entry(gh).or_default().insert(doc_id);
 
         // Index housenumber geohashes
         for hn in &doc.housenumbers {
-            let coord = geohash::Coord { x: hn.lon, y: hn.lat };
+            let coord = geohash::Coord {
+                x: hn.lon,
+                y: hn.lat,
+            };
             let gh = geohash::encode(coord, 7)?;
             self.geohash_sets.entry(gh).or_default().insert(doc_id);
         }
@@ -74,7 +82,10 @@ impl IndexBuilder {
         // Index filters
         for (key, value) in &doc.filters {
             let filter_key = format!("{}:{}", key, value);
-            self.filter_sets.entry(filter_key).or_default().insert(doc_id);
+            self.filter_sets
+                .entry(filter_key)
+                .or_default()
+                .insert(doc_id);
         }
 
         // Index tokens from fields
@@ -149,13 +160,16 @@ impl IndexBuilder {
         w.write_u32::<LittleEndian>(sections.len() as u32)?;
 
         // Compute section offsets
-        let headers_end =
-            16 + sections.len() as u64 * super::format::SECTION_HEADER_SIZE as u64;
+        let headers_end = 16 + sections.len() as u64 * super::format::SECTION_HEADER_SIZE as u64;
         let mut offset = align8(headers_end);
 
         let mut headers: Vec<SectionHeader> = Vec::with_capacity(sections.len());
         for (kind, data) in sections {
-            headers.push(SectionHeader { kind: *kind, offset, length: data.len() as u64 });
+            headers.push(SectionHeader {
+                kind: *kind,
+                offset,
+                length: data.len() as u64,
+            });
             offset = align8(offset + data.len() as u64);
         }
 
@@ -197,7 +211,10 @@ impl IndexBuilder {
 
         for form in forms {
             let token_id = self.get_or_insert_token(form);
-            self.token_scores.entry(token_id).or_default().push((doc_id, score));
+            self.token_scores
+                .entry(token_id)
+                .or_default()
+                .push((doc_id, score));
             doc_token_ids.push(token_id);
             for ngram in edge_ngrams(form) {
                 self.ngram_sets.entry(ngram).or_default().insert(token_id);
@@ -237,7 +254,11 @@ impl IndexBuilder {
         let count = self.next_token_id;
         buf.write_u32::<LittleEndian>(count)?;
         for token_id in 0..count {
-            let entries = self.token_scores.get(&token_id).map(|v| v.as_slice()).unwrap_or(&[]);
+            let entries = self
+                .token_scores
+                .get(&token_id)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
             buf.write_u32::<LittleEndian>(entries.len() as u32)?;
             for (doc_id, score) in entries {
                 buf.write_u32::<LittleEndian>(*doc_id)?;
