@@ -2,17 +2,31 @@
 name = "geocoder-core"
 version = "0.1.0"
 edition = "2024"
+description = "Address geocoding ported from addok, with per-country profiles (French BAN profile included)"
+license = "MIT"
+repository = "https://github.com/Creatiwity/geocoder-core"
+readme = "README.md"
+keywords = ["geocoding", "addok", "address", "ban", "search"]
+categories = ["science::geo", "text-processing"]
+exclude = ["data/", "scripts/", "SCORING.md"]
+
+[features]
+default = ["cli"]
+# The geocoder-build / geocoder-search binaries (downloads over HTTP).
+cli = ["dep:ureq"]
 
 [[bin]]
 name = "geocoder-build"
 path = "src/bin/build.rs"
+required-features = ["cli"]
 
 [[bin]]
 name = "geocoder-search"
 path = "src/bin/search.rs"
+required-features = ["cli"]
 
 [dependencies]
-fst = { version = "0.4", features = ["levenshtein"] }
+fst = "0.4"
 roaring = "0.11"
 memmap2 = "0.9"
 unidecode = "0.3"
@@ -28,7 +42,7 @@ once_cell = "1.21"
 thiserror = "2.0"
 byteorder = "1.5"
 
-ureq = "2"
+ureq = { version = "2", optional = true }
 
 [dev-dependencies]
 tempfile = "3.27"

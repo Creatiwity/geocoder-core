@@ -1,9 +1,11 @@
 pub mod builder;
 pub mod format;
+pub mod import;
 pub mod store;
 
 pub use builder::IndexBuilder;
 pub use format::Meta;
+pub use import::{ImportProgress, ImportStats, import};
 pub use store::Index;
 
 use crate::types::DocId;

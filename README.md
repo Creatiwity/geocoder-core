@@ -51,6 +51,27 @@ echo "bd haussmann paris" | ./target/release/geocoder-search --batch data/index-
 GEOCODER_DEBUG=1 ./target/release/geocoder-search data/index-ban.bin rebenac lag
 ```
 
+### As a library
+
+```toml
+geocoder-core = { git = "https://github.com/Creatiwity/geocoder-core", tag = "v0.1.0", default-features = false }
+```
+
+```rust
+use geocoder_core::{Geocoder, SearchOpts, index, profile, readers::Source};
+
+// Build (atomic: written next to the target, then renamed).
+let reader = std::io::BufReader::new(flate2::read::MultiGzDecoder::new(std::fs::File::open(path)?));
+index::import(reader, Source::Addok, profile::by_name("fr").unwrap(), "index.bin".as_ref(), |_| {})?;
+
+// Query.
+let geocoder = Geocoder::open("index.bin".as_ref())?;
+let results = geocoder.search("42 rue de rivoli paris", SearchOpts::default());
+```
+
+The `cli` feature (on by default) only adds the `geocoder-build` and
+`geocoder-search` binaries.
+
 ## Validation
 
 Two levels, both against addok itself:
@@ -77,3 +98,8 @@ Two levels, both against addok itself:
    python3 scripts/compare_api.py data/index-ban.bin \
        --data data/adresses-addok-france.ndjson.gz --sample 200
    ```
+
+## License
+
+MIT. geocoder-core ports addok, addok-fr and addok-france (MIT, Etalab /
+DINUM); see `LICENSE`.

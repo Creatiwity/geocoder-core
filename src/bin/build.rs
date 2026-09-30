@@ -1,10 +1,10 @@
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufReader, Read};
 use std::path::PathBuf;
-use std::time::Instant;
 
 use flate2::read::MultiGzDecoder;
+use geocoder_core::index::import;
 use geocoder_core::readers::Source;
-use geocoder_core::{GeocoderError, IndexBuilder, profile};
+use geocoder_core::{GeocoderError, profile};
 
 const USAGE: &str = "usage: geocoder-build [--source addok|bano] [--profile fr|default] <url|path[.gz]> <output.bin>
 
@@ -62,41 +62,20 @@ fn main() -> Result<(), GeocoderError> {
     };
     let reader = BufReader::with_capacity(1 << 20, reader);
 
-    let started = Instant::now();
-    let mut builder = IndexBuilder::new(profile);
-    let mut invalid = 0usize;
-    for (line_no, line) in reader.lines().enumerate() {
-        let line = line?;
-        match source.parse(&line) {
-            Ok(Some(doc)) => {
-                builder.add_document(doc)?;
-            }
-            Ok(None) => {}
-            Err(e) => {
-                invalid += 1;
-                if invalid <= 10 {
-                    eprintln!("line {}: {e}", line_no + 1);
-                }
-            }
-        }
-        if (line_no + 1) % 200_000 == 0 {
-            eprintln!(
-                "{} lines, {} indexed, {:?}",
-                line_no + 1,
-                builder.documents(),
-                started.elapsed()
-            );
-        }
-    }
+    let stats = import(reader, source, profile, &output, |p| {
+        eprintln!(
+            "{} lines, {} indexed, {:?}",
+            p.lines, p.documents, p.elapsed
+        );
+    })?;
     eprintln!(
-        "{} documents indexed, {} skipped, {} invalid lines, writing {}",
-        builder.documents(),
-        builder.skipped(),
-        invalid,
-        output.display()
+        "{} documents indexed, {} skipped, {} invalid lines, written to {} in {:?}",
+        stats.documents,
+        stats.skipped,
+        stats.invalid,
+        output.display(),
+        stats.elapsed
     );
-    builder.build(&output)?;
-    eprintln!("done in {:?}", started.elapsed());
     Ok(())
 }
 
