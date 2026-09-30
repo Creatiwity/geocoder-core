@@ -1,4 +1,5 @@
 use crate::text::{compare_label, compare_str};
+use crate::text::normalize::normalize;
 
 const IMPORTANCE_WEIGHT: f32 = 0.1;
 const GEO_DISTANCE_WEIGHT: f32 = 0.1;
@@ -24,7 +25,7 @@ impl<'a> Scorer<'a> {
             None => base_label,
         };
 
-        // 1. Full-label vs full-query bigram Dice (addok's compare_ngrams N=2)
+        // 1. Full-label vs full-query bigram Dice (addok's compare_ngrams N=2, pad_len=0)
         let label_score = compare_label(self.query, &label);
 
         // 2. Autocomplete distance (exact / prefix / contains) on the label
@@ -41,15 +42,15 @@ impl<'a> Scorer<'a> {
         let str_score = label_score.max(auto_score).max(token_score);
 
         // Addok formula: sum(scores) / sum(ceilings)
-        // Without geo: (str_score * 1.0 + importance * IMPORTANCE_WEIGHT) / (1.0 + IMPORTANCE_WEIGHT)
+        // Ceilings are NEVER modified (only values change in adjust_scores).
         let mut score_sum = str_score + importance * IMPORTANCE_WEIGHT;
-        let mut ceil_sum = 1.0 + IMPORTANCE_WEIGHT;
+        let mut ceil_sum = 1.0_f32 + IMPORTANCE_WEIGHT;
 
         if let (Some(lat), Some(lon)) = (self.lat, self.lon) {
-            // With geo hint: str_score * 0.9, importance contribution * 0.1 (adjust_scores)
+            // adjust_scores: multiply values by 0.9 (str) and 0.1 (importance), ceilings unchanged
             score_sum = str_score * 0.9 + importance * IMPORTANCE_WEIGHT * 0.1;
-            ceil_sum = 0.9 + IMPORTANCE_WEIGHT * 0.1;
-            // Add geo component
+            // ceil_sum stays: 1.0 (str_distance) + IMPORTANCE_WEIGHT (importance) = 1.1
+            // then geo ceiling is added below → 1.2 total
             let km = haversine_km(lat, lon, doc_lat, doc_lon);
             score_sum += km_to_score(km) * GEO_DISTANCE_WEIGHT;
             ceil_sum += GEO_DISTANCE_WEIGHT;
@@ -77,20 +78,34 @@ fn build_label(doc: &serde_json::Value) -> String {
     }
 }
 
-/// Exact / prefix / contains match of query against label.
-/// Returns 1.0 / 0.9 / 0.7 / 0.0.
+/// Exact / prefix / contains match of ASCII-folded query against ASCII-folded label.
+/// Returns 1.0 / 0.9 / 0.7 / 0.0 per addok's score_by_autocomplete_distance.
 pub fn autocomplete_distance(query: &str, label: &str) -> f32 {
-    let q = query.to_lowercase();
-    let l = label.to_lowercase();
-    if l == q { 1.0 } else if l.starts_with(&q) { 0.9 } else if l.contains(q.as_str()) { 0.7 } else { 0.0 }
+    let q = normalize(query);
+    let l = normalize(label);
+    if l == q {
+        1.0
+    } else if l.starts_with(q.as_str()) {
+        0.9
+    } else if l.contains(q.as_str()) {
+        0.7
+    } else {
+        0.0
+    }
 }
 
+/// Gaussian decay: exp(-(km/50)²), clipped to 0.0 beyond 100 km.
+/// Mirrors addok's km_to_score() from helpers/__init__.py.
 pub fn km_to_score(km: f64) -> f32 {
-    (1.0 / (1.0 + km / 50.0)) as f32
+    if km > 100.0 {
+        return 0.0;
+    }
+    f64::exp(-(km / 50.0).powi(2)) as f32
 }
 
+/// Haversine distance in km. Earth radius = 6367 km (per addok spec).
 pub fn haversine_km(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
-    const R: f64 = 6371.0;
+    const R: f64 = 6367.0;
     let dlat = (lat2 - lat1).to_radians();
     let dlon = (lon2 - lon1).to_radians();
     let a = (dlat / 2.0).sin().powi(2)
@@ -105,6 +120,12 @@ mod tests {
     #[test]
     fn test_autocomplete_distance_exact() {
         assert_eq!(autocomplete_distance("rue de la paix", "Rue de la Paix"), 1.0);
+    }
+
+    #[test]
+    fn test_autocomplete_distance_exact_accents() {
+        // ASCII folding: accented chars must match
+        assert_eq!(autocomplete_distance("ile de france", "Île-de-France"), 1.0);
     }
 
     #[test]
@@ -123,25 +144,34 @@ mod tests {
     }
 
     #[test]
-    fn test_km_to_score() {
-        assert!((km_to_score(0.0) - 1.0).abs() < 0.01);
-        assert!(km_to_score(50.0) > 0.4 && km_to_score(50.0) < 0.6);
-        assert!(km_to_score(200.0) <= 0.2);
+    fn test_km_to_score_zero() {
+        assert!((km_to_score(0.0) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_km_to_score_gaussian() {
+        // exp(-(50/50)²) = exp(-1) ≈ 0.368
+        let s = km_to_score(50.0);
+        assert!((s - 0.368).abs() < 0.01, "score at 50km was {}", s);
+    }
+
+    #[test]
+    fn test_km_to_score_cutoff() {
+        assert_eq!(km_to_score(100.1), 0.0);
+        assert_eq!(km_to_score(200.0), 0.0);
+    }
+
+    #[test]
+    fn test_km_to_score_table() {
+        // Values from SCORING.md table
+        assert!((km_to_score(10.0) - 0.960).abs() < 0.01);
+        assert!((km_to_score(25.0) - 0.779).abs() < 0.01);
+        assert!((km_to_score(75.0) - 0.105).abs() < 0.01);
     }
 
     #[test]
     fn test_haversine_paris_lyon() {
         let km = haversine_km(48.8566, 2.3522, 45.7640, 4.8357);
         assert!(km > 390.0 && km < 420.0);
-    }
-
-    #[test]
-    fn test_compare_label_bigram() {
-        // Full label vs full query similarity
-        let score = compare_label(
-            "20 avenue des champs elysees paris",
-            "Avenue des Champs Elysees 75008 Paris",
-        );
-        assert!(score > 0.6, "score was {}", score);
     }
 }

@@ -9,7 +9,7 @@ use fst::MapBuilder;
 use roaring::RoaringBitmap;
 
 use crate::error::GeocoderError;
-use crate::text::{edge_ngrams, synonyms_for, tokenize};
+use crate::text::{edge_ngrams, phonemicize, synonyms_for, tokenize};
 use crate::types::{DocId, Document, TokenId};
 
 use super::format::{MAGIC, SectionHeader, SectionKind, VERSION};
@@ -105,6 +105,7 @@ impl IndexBuilder {
                     }
                     self.index_token_with_synonyms(
                         &token.normalized,
+                        &token.lemma,
                         doc_id,
                         score,
                         &mut doc_token_ids,
@@ -197,28 +198,42 @@ impl IndexBuilder {
         Ok(())
     }
 
-    /// Index a token and all its synonyms for `doc_id`, appending token IDs to `doc_token_ids`.
+    /// Index a token for `doc_id`. Also indexes the phonemicized canonical synonym form so that
+    /// documents using abbreviations (e.g. "Bd Haussmann") are also findable via the canonical
+    /// phonemicized form ("boulevar"). Mirrors addok's index-time synonym expansion.
     fn index_token_with_synonyms(
         &mut self,
         normalized: &str,
+        lemma: &str,
         doc_id: DocId,
         score: f32,
         doc_token_ids: &mut Vec<TokenId>,
     ) {
-        let mut forms: Vec<&str> = Vec::with_capacity(4);
-        forms.push(normalized);
-        forms.extend_from_slice(synonyms_for(normalized));
+        // Always index the phonemicized form
+        self.index_one_token(normalized, doc_id, score, doc_token_ids);
 
-        for form in forms {
-            let token_id = self.get_or_insert_token(form);
-            self.token_scores
-                .entry(token_id)
-                .or_default()
-                .push((doc_id, score));
-            doc_token_ids.push(token_id);
-            for ngram in edge_ngrams(form) {
-                self.ngram_sets.entry(ngram).or_default().insert(token_id);
+        // If the lemma (pre-phonemicize form) is an abbreviation, also index its canonical
+        // phonemicized equivalent so both "bd" and "boulevard" documents share the same token.
+        if let Some(canonical) = synonyms_for(lemma) {
+            let ph = phonemicize(canonical);
+            if ph != normalized {
+                self.index_one_token(&ph, doc_id, score, doc_token_ids);
             }
+        }
+    }
+
+    fn index_one_token(
+        &mut self,
+        form: &str,
+        doc_id: DocId,
+        score: f32,
+        doc_token_ids: &mut Vec<TokenId>,
+    ) {
+        let token_id = self.get_or_insert_token(form);
+        self.token_scores.entry(token_id).or_default().push((doc_id, score));
+        doc_token_ids.push(token_id);
+        for ngram in edge_ngrams(form) {
+            self.ngram_sets.entry(ngram).or_default().insert(token_id);
         }
     }
 

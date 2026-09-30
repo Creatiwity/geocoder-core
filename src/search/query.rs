@@ -1,5 +1,5 @@
 use crate::index::store::Index;
-use crate::text::{synonyms_for, tokenize};
+use crate::text::{phonemicize, synonyms_for, tokenize};
 use crate::types::{Token, TokenId};
 
 const COMMON_THRESHOLD: usize = 10_000;
@@ -27,7 +27,7 @@ pub fn preprocess(raw: &str, index: &Index) -> ClassifiedQuery {
         }
 
         // Try the token itself, then its synonyms
-        let token_id = resolve_token(&token.normalized, index);
+        let token_id = resolve_token(&token, index);
 
         match token_id {
             None => not_found.push(token),
@@ -46,13 +46,17 @@ pub fn preprocess(raw: &str, index: &Index) -> ClassifiedQuery {
     ClassifiedQuery { meaningful, common, housenumbers, not_found, threshold }
 }
 
-/// Look up a token in the FST. If not found, try its synonyms and return the first hit.
-fn resolve_token(normalized: &str, index: &Index) -> Option<TokenId> {
-    if let Some(id) = index.token_fst.get(normalized) {
+/// Look up a token in the FST. If not found, try phonemicized synonym forms.
+fn resolve_token(token: &Token, index: &Index) -> Option<TokenId> {
+    // Try phonemicized form first (what the FST stores)
+    if let Some(id) = index.token_fst.get(&token.normalized) {
         return Some(id as TokenId);
     }
-    for &syn in synonyms_for(normalized) {
-        if let Some(id) = index.token_fst.get(syn) {
+    // Synonym lookup uses the pre-phonemicize lemma (e.g. "bd", "av", "st")
+    // and phonemicizes the canonical target before FST lookup (e.g. "boulevard" → "boulevar")
+    if let Some(canonical) = synonyms_for(&token.lemma) {
+        let phonemicized = phonemicize(canonical);
+        if let Some(id) = index.token_fst.get(&phonemicized) {
             return Some(id as TokenId);
         }
     }

@@ -103,7 +103,10 @@ pub struct ReverseOpts {
 #[derive(Debug, Clone)]
 pub struct Token {
     pub text: String,
+    /// Phonemicized form — used for FST lookup and scoring.
     pub normalized: String,
+    /// Pre-phonemicize normalized form — used for synonym lookup.
+    pub lemma: String,
     pub position: usize,
     pub is_housenumber: bool,
 }
