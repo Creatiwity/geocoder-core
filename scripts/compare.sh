@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Compare geocoder-core results against the BAN API (addok reference).
+# Compare geocoder-core results against the BAN API (addok reference), served
+# by the Géoplateforme. For a quantified comparison, see compare_api.py.
 # Usage: ./scripts/compare.sh <index.bin>
 
 set -euo pipefail
 INDEX=${1:?usage: compare.sh <index.bin>}
 BIN="$(dirname "$0")/../target/release/geocoder-search"
-API="https://api-adresse.data.gouv.fr/search"
+API="https://data.geopf.fr/geocodage/search"
 
 urlencode() { python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$1"; }
 
@@ -14,7 +15,7 @@ run() {
     printf '\n\033[1m══ %s\033[0m\n   query: "%s"\n\n' "$label" "$query"
 
     printf '\033[33m── addok (BAN API) ──\033[0m\n'
-    curl -s "${API}/?q=$(urlencode "$query")&limit=5${extra_api}" \
+    curl -s "${API}/?index=address&q=$(urlencode "$query")&limit=5${extra_api}" \
       | python3 -c "
 import json,sys
 for f in json.load(sys.stdin)['features']:

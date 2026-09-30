@@ -1,212 +1,242 @@
-use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 
-use byteorder::{LittleEndian, ReadBytesExt};
 use flate2::read::ZlibDecoder;
 use fst::Map;
 use memmap2::Mmap;
 use roaring::RoaringBitmap;
 
+use super::format::{HEADER_SIZE, MAGIC, Meta, SECTION_HEADER_SIZE, SectionKind, VERSION};
+use crate::doc::Document;
 use crate::error::GeocoderError;
 use crate::types::{DocId, TokenId};
 
-use super::format::{SectionHeader, SectionKind, MAGIC, VERSION};
-
+/// A read-only index, memory mapped. Only the FSTs are copied in memory;
+/// postings, bitmaps and documents are read in place on demand.
 pub struct Index {
-    _mmap: Mmap,
-    pub token_fst: Map<Vec<u8>>,
-    /// TokenId → Vec<(DocId, score)> sorted by score desc
-    pub token_scores: Vec<Vec<(DocId, f32)>>,
-    /// "filter:value" → RoaringBitmap<DocId>
-    pub filter_sets: HashMap<String, RoaringBitmap>,
-    /// geohash7 → RoaringBitmap<DocId>
-    pub geohash_sets: HashMap<String, RoaringBitmap>,
-    /// TokenId → RoaringBitmap<TokenId> co-occurrents
-    pub pair_sets: HashMap<TokenId, RoaringBitmap>,
-    /// ngram prefix → RoaringBitmap<TokenId>
-    pub ngram_sets: HashMap<String, RoaringBitmap>,
-    /// DocId → byte offset within doc_blobs
-    doc_offsets: HashMap<DocId, u64>,
-    /// Concatenated zlib-compressed JSON documents
-    doc_blobs: Vec<u8>,
+    mmap: Mmap,
+    ranges: Vec<(usize, usize)>,
+    pub meta: Meta,
+    token_fst: Map<Vec<u8>>,
+    ngram_fst: Map<Vec<u8>>,
+    geohash_fst: Map<Vec<u8>>,
+    filter_fst: Map<Vec<u8>>,
 }
 
 impl Index {
     pub fn open(path: &Path) -> Result<Self, GeocoderError> {
         let file = std::fs::File::open(path)?;
+        // SAFETY: the index file is written once and never modified in place.
         let mmap = unsafe { Mmap::map(&file)? };
-        Self::parse(mmap)
-    }
-
-    fn parse(mmap: Mmap) -> Result<Self, GeocoderError> {
         let data: &[u8] = &mmap;
-
-        if &data[..8] != MAGIC {
+        if data.len() < HEADER_SIZE || &data[..8] != MAGIC {
             return Err(GeocoderError::InvalidIndex("bad magic bytes"));
         }
-        let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
-        if version != VERSION {
-            return Err(GeocoderError::InvalidIndex("unsupported version"));
+        if u32::from_le_bytes(data[8..12].try_into().unwrap()) != VERSION {
+            return Err(GeocoderError::InvalidIndex(
+                "unsupported format version, rebuild the index",
+            ));
         }
-        let section_count = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
-
-        let mut headers: Vec<SectionHeader> = Vec::with_capacity(section_count);
-        let mut cursor = 16;
-        for _ in 0..section_count {
-            let kind = SectionKind::try_from(data[cursor])
-                .map_err(|_| GeocoderError::InvalidIndex("unknown section kind"))?;
-            let offset = u64::from_le_bytes(data[cursor + 1..cursor + 9].try_into().unwrap());
-            let length = u64::from_le_bytes(data[cursor + 9..cursor + 17].try_into().unwrap());
-            headers.push(SectionHeader { kind, offset, length });
-            cursor += 17;
+        let count = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
+        let mut ranges = vec![(0usize, 0usize); SectionKind::ALL.len()];
+        let mut found = vec![false; SectionKind::ALL.len()];
+        for i in 0..count {
+            let at = HEADER_SIZE + i * SECTION_HEADER_SIZE;
+            let header = data
+                .get(at..at + SECTION_HEADER_SIZE)
+                .ok_or(GeocoderError::InvalidIndex("truncated"))?;
+            let Ok(kind) = SectionKind::try_from(header[0]) else {
+                continue;
+            };
+            let offset = u64::from_le_bytes(header[1..9].try_into().unwrap()) as usize;
+            let length = u64::from_le_bytes(header[9..17].try_into().unwrap()) as usize;
+            if offset + length > data.len() {
+                return Err(GeocoderError::InvalidIndex("truncated"));
+            }
+            ranges[kind as usize] = (offset, offset + length);
+            found[kind as usize] = true;
         }
-
-        let section = |kind: SectionKind| -> Result<&[u8], GeocoderError> {
-            headers
-                .iter()
-                .find(|h| h.kind == kind)
-                .map(|h| &data[h.offset as usize..h.offset as usize + h.length as usize])
-                .ok_or(GeocoderError::InvalidIndex("missing section"))
+        if found.iter().any(|f| !f) {
+            return Err(GeocoderError::InvalidIndex("missing section"));
+        }
+        let section = |kind: SectionKind| {
+            let (start, end) = ranges[kind as usize];
+            &data[start..end]
         };
-
-        let token_fst = Map::new(section(SectionKind::TokenFst)?.to_vec())?;
-        let token_scores = parse_token_scores(section(SectionKind::TokenScores)?)?;
-        let filter_sets = parse_keyed_bitmaps(section(SectionKind::FilterSets)?)?;
-        let geohash_sets = parse_keyed_bitmaps(section(SectionKind::GeohashSets)?)?;
-        let pair_sets = parse_pair_sets(section(SectionKind::PairSets)?)?;
-        let ngram_sets = parse_keyed_bitmaps(section(SectionKind::NgramSets)?)?;
-        let doc_offsets = parse_doc_offsets(section(SectionKind::DocOffsets)?)?;
-        // DocBlobs copied from mmap into Vec so get_document doesn't borrow mmap
-        let doc_blobs = section(SectionKind::DocBlobs)?.to_vec();
-
+        let meta: Meta = serde_json::from_slice(section(SectionKind::Meta))?;
+        let token_fst = Map::new(section(SectionKind::TokenFst).to_vec())?;
+        let ngram_fst = Map::new(section(SectionKind::NgramFst).to_vec())?;
+        let geohash_fst = Map::new(section(SectionKind::GeohashFst).to_vec())?;
+        let filter_fst = Map::new(section(SectionKind::FilterFst).to_vec())?;
         Ok(Self {
-            _mmap: mmap,
+            mmap,
+            ranges,
+            meta,
             token_fst,
-            token_scores,
-            filter_sets,
-            geohash_sets,
-            pair_sets,
-            ngram_sets,
-            doc_offsets,
-            doc_blobs,
+            ngram_fst,
+            geohash_fst,
+            filter_fst,
         })
     }
 
-    /// Decompress and parse the document stored at `doc_id`.
-    pub fn get_document(&self, doc_id: DocId) -> Option<serde_json::Value> {
-        let &offset = self.doc_offsets.get(&doc_id)?;
-        // ZlibDecoder is self-terminating: stops at end of compressed stream
-        // even though doc_blobs may contain subsequent documents after this one.
-        let blob = &self.doc_blobs[offset as usize..];
-        let mut decoder = ZlibDecoder::new(blob);
+    fn section(&self, kind: SectionKind) -> &[u8] {
+        let (start, end) = self.ranges[kind as usize];
+        &self.mmap[start..end]
+    }
+
+    fn offset(&self, kind: SectionKind, i: usize) -> Option<(usize, usize)> {
+        let table = self.section(kind);
+        let at = i * 8;
+        let start = u64::from_le_bytes(table.get(at..at + 8)?.try_into().ok()?) as usize;
+        let end = u64::from_le_bytes(table.get(at + 8..at + 16)?.try_into().ok()?) as usize;
+        Some((start, end))
+    }
+
+    pub fn token_id(&self, token: &str) -> Option<TokenId> {
+        self.token_fst.get(token).map(|v| v as TokenId)
+    }
+
+    pub fn token_fst(&self) -> &Map<Vec<u8>> {
+        &self.token_fst
+    }
+
+    /// Number of documents holding the token (Redis `ZCARD`).
+    pub fn frequency(&self, token: TokenId) -> usize {
+        self.offset(SectionKind::PostingOffsets, token as usize)
+            .map(|(s, e)| e - s)
+            .unwrap_or(0)
+    }
+
+    /// Postings sorted by document.
+    pub fn postings(&self, token: TokenId) -> Postings<'_> {
+        let (start, end) = self
+            .offset(SectionKind::PostingOffsets, token as usize)
+            .unwrap_or((0, 0));
+        Postings {
+            bytes: &self.section(SectionKind::PostingsByDoc)[start * 8..end * 8],
+        }
+    }
+
+    /// The first `limit` documents of a token, like `ZREVRANGE key 0 limit-1`.
+    pub fn top(&self, token: TokenId, limit: usize) -> impl Iterator<Item = DocId> + '_ {
+        let (start, end) = self
+            .offset(SectionKind::PostingOffsets, token as usize)
+            .unwrap_or((0, 0));
+        let bytes = &self.section(SectionKind::PostingsByScore)[start * 4..end * 4];
+        bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .take(limit)
+            .map(|c| u32::from_le_bytes(*c))
+    }
+
+    /// Tokens seen in at least one document along with `token`.
+    pub fn pairs(&self, token: TokenId) -> RoaringBitmap {
+        self.offset(SectionKind::PairOffsets, token as usize)
+            .and_then(|(s, e)| {
+                RoaringBitmap::deserialize_from(&self.section(SectionKind::PairBlobs)[s..e]).ok()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Tokens starting with `prefix` (and longer than it).
+    pub fn edge_ngram(&self, prefix: &str) -> RoaringBitmap {
+        self.keyed(
+            &self.ngram_fst,
+            prefix,
+            SectionKind::NgramOffsets,
+            SectionKind::NgramBlobs,
+        )
+    }
+
+    pub fn geohash(&self, cell: &str) -> RoaringBitmap {
+        self.keyed(
+            &self.geohash_fst,
+            cell,
+            SectionKind::GeohashOffsets,
+            SectionKind::GeohashBlobs,
+        )
+    }
+
+    /// Documents whose filter `key` has `value`.
+    pub fn filter(&self, key: &str, value: &str) -> RoaringBitmap {
+        let k = format!("{key}|{value}");
+        self.keyed(
+            &self.filter_fst,
+            &k,
+            SectionKind::FilterOffsets,
+            SectionKind::FilterBlobs,
+        )
+    }
+
+    fn keyed(
+        &self,
+        fst: &Map<Vec<u8>>,
+        key: &str,
+        offsets: SectionKind,
+        blobs: SectionKind,
+    ) -> RoaringBitmap {
+        fst.get(key)
+            .and_then(|i| self.offset(offsets, i as usize))
+            .and_then(|(s, e)| RoaringBitmap::deserialize_from(&self.section(blobs)[s..e]).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn document(&self, doc: DocId) -> Option<Document> {
+        let (start, end) = self.offset(SectionKind::DocOffsets, doc as usize)?;
         let mut json = Vec::new();
-        decoder.read_to_end(&mut json).ok()?;
+        ZlibDecoder::new(&self.section(SectionKind::DocBlobs)[start..end])
+            .read_to_end(&mut json)
+            .ok()?;
         serde_json::from_slice(&json).ok()
     }
-
-    /// Number of documents indexed under `token_id` (used for frequency ranking).
-    pub fn token_frequency(&self, token_id: TokenId) -> usize {
-        self.token_scores.get(token_id as usize).map(|v| v.len()).unwrap_or(0)
-    }
-
-    /// Intersect token score lists (SUM aggregate), return top-`limit` by score.
-    pub fn zinter_top_n(&self, token_ids: &[TokenId], limit: usize) -> Vec<(DocId, f32)> {
-        if token_ids.is_empty() {
-            return vec![];
-        }
-
-        // Process smallest set first for faster intersection
-        let mut sorted_ids = token_ids.to_vec();
-        sorted_ids.sort_unstable_by_key(|&tid| self.token_frequency(tid));
-
-        let first = match self.token_scores.get(sorted_ids[0] as usize) {
-            Some(v) => v,
-            None => return vec![],
-        };
-
-        let mut candidates: HashMap<DocId, f32> =
-            first.iter().map(|&(doc, score)| (doc, score)).collect();
-
-        for &tid in &sorted_ids[1..] {
-            let Some(scores) = self.token_scores.get(tid as usize) else {
-                return vec![];
-            };
-            let lookup: HashMap<DocId, f32> =
-                scores.iter().map(|&(doc, score)| (doc, score)).collect();
-            candidates.retain(|doc, score| match lookup.get(doc) {
-                Some(&s) => { *score += s; true }
-                None => false,
-            });
-        }
-
-        let mut result: Vec<(DocId, f32)> = candidates.into_iter().collect();
-        if result.len() > limit {
-            result.select_nth_unstable_by(limit, |a, b| b.1.partial_cmp(&a.1).unwrap());
-            result.truncate(limit);
-        }
-        result.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        result
-    }
 }
 
-fn parse_token_scores(data: &[u8]) -> Result<Vec<Vec<(DocId, f32)>>, GeocoderError> {
-    let mut r = data;
-    let count = r.read_u32::<LittleEndian>()? as usize;
-    let mut result = Vec::with_capacity(count);
-    for _ in 0..count {
-        let entry_count = r.read_u32::<LittleEndian>()? as usize;
-        let mut entries = Vec::with_capacity(entry_count);
-        for _ in 0..entry_count {
-            let doc_id = r.read_u32::<LittleEndian>()?;
-            let score = r.read_f32::<LittleEndian>()?;
-            entries.push((doc_id, score));
+/// `(doc, boost)` entries of one token, sorted by doc.
+#[derive(Clone, Copy)]
+pub struct Postings<'a> {
+    bytes: &'a [u8],
+}
+
+impl<'a> Postings<'a> {
+    pub fn len(&self) -> usize {
+        self.bytes.len() / 8
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    pub fn get(&self, i: usize) -> (DocId, f32) {
+        let at = i * 8;
+        let doc = u32::from_le_bytes(self.bytes[at..at + 4].try_into().unwrap());
+        let boost = f32::from_le_bytes(self.bytes[at + 4..at + 8].try_into().unwrap());
+        (doc, boost)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (DocId, f32)> + 'a {
+        let bytes = self.bytes;
+        bytes.as_chunks::<8>().0.iter().map(|c| {
+            (
+                u32::from_le_bytes([c[0], c[1], c[2], c[3]]),
+                f32::from_le_bytes([c[4], c[5], c[6], c[7]]),
+            )
+        })
+    }
+
+    /// Boost of `doc`, if it holds the token.
+    pub fn find(&self, doc: DocId) -> Option<f32> {
+        let (mut lo, mut hi) = (0, self.len());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            let (d, boost) = self.get(mid);
+            match d.cmp(&doc) {
+                std::cmp::Ordering::Equal => return Some(boost),
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+            }
         }
-        result.push(entries);
+        None
     }
-    Ok(result)
-}
-
-fn parse_keyed_bitmaps(data: &[u8]) -> Result<HashMap<String, RoaringBitmap>, GeocoderError> {
-    let mut r = data;
-    let count = r.read_u32::<LittleEndian>()? as usize;
-    let mut map = HashMap::with_capacity(count);
-    for _ in 0..count {
-        let key_len = r.read_u16::<LittleEndian>()? as usize;
-        let key = std::str::from_utf8(&r[..key_len])
-            .map_err(|_| GeocoderError::InvalidIndex("invalid utf8 key"))?
-            .to_string();
-        r = &r[key_len..];
-        let bm_len = r.read_u32::<LittleEndian>()? as usize;
-        let bitmap = RoaringBitmap::deserialize_from(&r[..bm_len])?;
-        r = &r[bm_len..];
-        map.insert(key, bitmap);
-    }
-    Ok(map)
-}
-
-fn parse_pair_sets(data: &[u8]) -> Result<HashMap<TokenId, RoaringBitmap>, GeocoderError> {
-    let mut r = data;
-    let count = r.read_u32::<LittleEndian>()? as usize;
-    let mut map = HashMap::with_capacity(count);
-    for _ in 0..count {
-        let token_id = r.read_u32::<LittleEndian>()?;
-        let bm_len = r.read_u32::<LittleEndian>()? as usize;
-        let bitmap = RoaringBitmap::deserialize_from(&r[..bm_len])?;
-        r = &r[bm_len..];
-        map.insert(token_id, bitmap);
-    }
-    Ok(map)
-}
-
-fn parse_doc_offsets(data: &[u8]) -> Result<HashMap<DocId, u64>, GeocoderError> {
-    let mut r = data;
-    let count = r.read_u32::<LittleEndian>()? as usize;
-    let mut map = HashMap::with_capacity(count);
-    for _ in 0..count {
-        let doc_id = r.read_u32::<LittleEndian>()?;
-        let offset = r.read_u64::<LittleEndian>()?;
-        map.insert(doc_id, offset);
-    }
-    Ok(map)
 }

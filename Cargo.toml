@@ -18,7 +18,9 @@ memmap2 = "0.9"
 unidecode = "0.3"
 geohash = "0.13"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# preserve_order: addok relies on document key order (e.g. two housenumbers
+# "11b" and "11bis" folding to the same key: the last one wins).
+serde_json = { version = "1.0", features = ["preserve_order"] }
 flate2 = "1.1"
 regex = "1.12"
 fancy-regex = "0.13"

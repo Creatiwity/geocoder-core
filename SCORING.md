@@ -1,522 +1,155 @@
-# Addok — Système de scoring : référence d'implémentation
+# Scoring addok — référence (API Adresse / Géoplateforme)
 
-Ce document décrit exhaustivement le système de scoring d'addok, avec toutes les formules, paramètres et valeurs par défaut, dans le but de permettre une réimplémentation exacte dans un autre langage.
+Ce document décrit le comportement que geocoder-core reproduit : celui de
+l'API Adresse, servie depuis 2024 par le géocodeur de la Géoplateforme (IGN,
+`data.geopf.fr/geocodage`, vers lequel `api-adresse.data.gouv.fr` redirige).
 
----
+- **Configuration** : `indexes/address/config/addok.conf` du dépôt
+  `geoplateforme/geocodage/geocodeur` (miroir `gouv-nc-data/gpf-geocodeur`).
+- **Versions** : **addok 1.3 + addok-fr 1.1.0 + addok-france 1.2.0**. Le
+  dépôt épingle encore addok 1.1.1 / addok-fr 1.0.1 / addok-france 1.1.3
+  (2023), mais l'API se comporte comme les versions de fin 2025 : filtres à
+  plusieurs valeurs (addok 1.3), libellés pour les anciennes communes
+  fusionnées (addok-france 1.2), phonétique d'addok-fr 1.1 (vérifié par
+  sondage : des requêtes que seule la 1.1 rapproche sont trouvées).
 
-## Table des matières
+Chaque point ci-dessous a été vérifié contre le code Python lui-même
+(`scripts/addok_oracle.py`, `scripts/diff_pipeline.py`).
 
-1. [Vue d'ensemble](#vue-densemble)
-2. [Pipeline de scoring](#pipeline-de-scoring)
-3. [Pré-traitement du texte (ASCII folding)](#pré-traitement-du-texte-ascii-folding)
-4. [Fonctions de comparaison textuelle](#fonctions-de-comparaison-textuelle)
-5. [Fonctions de scoring](#fonctions-de-scoring)
-6. [Agrégation du score final](#agrégation-du-score-final)
-7. [Paramètres de configuration (valeurs par défaut)](#paramètres-de-configuration-valeurs-par-défaut)
-8. [Boost à l'indexation](#boost-à-lindexation)
-9. [Pipeline de géocodage inverse](#pipeline-de-géocodage-inverse)
-10. [Exemple de calcul complet](#exemple-de-calcul-complet)
+> Attention aux sources : `BaseAdresseNationale/addok-docker` (addok 1.0.3)
+> et la configuration par défaut d'addok diffèrent de la production sur
+> plusieurs points (phonétique, arrêt anticipé de l'autocomplete, ordre des
+> collecteurs, champs, `MIN_SCORE`…).
 
----
+## 1. Traitement du texte
 
-## Vue d'ensemble
+### Requête (`QUERY_PROCESSORS`, sur la chaîne)
 
-Chaque résultat reçoit un score final entre 0 et 1, calculé comme une **moyenne pondérée** de composantes partielles. Chaque composante a une valeur et un plafond (*ceiling*). Le score final est :
+La requête est d'abord repliée en ASCII (`ascii` : minuscules, `unidecode`
+1.3.6, tout caractère non-mot → espace, espaces multiples fusionnés, bords
+retirés), puis :
 
-```
-score_final = Σ(valeurs) / Σ(plafonds)
-```
+1. `check_query_length` : 200 caractères maximum ;
+2. `extract_address` : si un motif « numéro [ordinal] type de voie … » est
+   trouvé, on ne garde que la partie qui commence au numéro
+   (« XYZ Ets bâtiment B 22 rue des Fleurs… » → « 22 rue des Fleurs… ») ;
+3. `clean_query` : codes postaux isolés, BP/CS/TSA/CIDEX, cedex (on ne garde
+   alors que le département du code postal), étages, `lieu-dit` en tête ;
+4. `remove_leading_zeros` : « 0003 » → « 3 » (1 à 3 chiffres seulement).
 
-Les composantes possibles sont : `importance`, `str_distance`, `geo_distance`.
+### Mots (`PROCESSORS`, à l'indexation comme à la requête)
 
----
+1. `tokenize` : suites de caractères de mot au sens Python (`str.isalnum()`
+   ou `_`) ;
+2. `normalize` : `unidecode(minuscules)` ;
+3. `glue_ordinal` : « 6 bis » → « 6bis » si suivi d'un type de voie ou de
+   rien (jamais un nombre de 5 chiffres, qui est un code postal) ;
+4. `fold_ordinal` : « 6bis » → « 6b » (bis→b, ter→t, quater→q,
+   quinquies→c, sexies→s) ;
+5. `flag_housenumber` : le premier nombre (`\d{1,4}[a-z]?`) en tête ou juste
+   avant un type de voie devient le numéro ;
+6. `synonymize` : remplacement (jamais ajout) selon `synonyms.txt`
+   d'addok-fr, éventuellement en plusieurs mots (« cr » → « chemin rural »).
+   Les nombres sont aussi concernés (« 1 » → « un », « 10 » → « dix ») ;
+7. `phonemicize` : règles d'addok-fr **1.1.0** (« rue » → « ru »,
+   « boulevard » → « boulevar », « champs » → « chan », « vingt » → « vin »,
+   « georges » → « jorj », « lyon » → « lion »).
 
-## Pipeline de scoring
+Les types de voie reconnus par `extract_address` et `flag_housenumber` sont
+ceux d'addok-france 1.2.0, abréviations comprises (« ch », « chp », « rdpt »…).
 
-L'ordre exact d'application est défini par `SEARCH_RESULT_PROCESSORS_PYPATHS` dans `addok/config/default.py` :
+Les mots de numéro ne sont pas cherchés dans l'index : ils servent à
+sélectionner le numéro dans le document (clé = mots du numéro concaténés).
 
-| Étape | Fonction | Fichier source |
-|-------|----------|----------------|
-| 1 | `match_housenumber` | `addok/helpers/results.py:32` |
-| 2 | `make_labels` | `addok/helpers/results.py:13` |
-| 3 | `score_by_importance` | `addok/helpers/results.py:51` |
-| 4 | `score_by_autocomplete_distance` | `addok/helpers/results.py:60` |
-| 5 | `score_by_ngram_distance` | `addok/helpers/results.py:101` |
-| 6 | `score_by_geo_distance` | `addok/helpers/results.py:107` |
-| 7 | `adjust_scores` | `addok/helpers/results.py:121` |
+## 2. Indexation
 
-Si une étape retourne `False`, le résultat est **éliminé** (non inclus dans la réponse).
+Champs indexés et poids (`FIELDS` + `EXTRA_FIELDS`) :
 
-> **Note :** `score_by_str_distance` existe dans le code mais n'est **pas** dans le pipeline par défaut.
+| Champ | Poids |
+|---|---|
+| `name` (obligatoire) | 4 |
+| `postcode` | 1,2 pour une commune, 1 sinon |
+| `street`, `city`, `context`, `citycode` | 1 |
 
----
+(`oldcity`, `oldcitycode` et `district`, indexés par addok-docker, ne le sont
+pas à la Géoplateforme.)
 
-## Pré-traitement du texte (ASCII folding)
+Pour chaque valeur d'un champ découpée en *n* mots, chaque mot reçoit
+`(poids + importance × 0,1) / n`, et un mot garde le meilleur poids vu dans
+le document. Ce poids ne sert qu'à **choisir et ordonner les candidats**
+(intersection des mots, scores sommés, 100 premiers), pas au score final.
 
-Avant toute comparaison textuelle, les chaînes sont normalisées via la classe `ascii` (`addok/helpers/text.py:136`).
+S'ajoutent : paires de mots co-présents (fuzzy, autocomplete, relations),
+préfixes d'autocomplete de 3 à 20 caractères de **tous** les mots, numériques
+compris (l'import passe par `addok batch` sur l'entrée standard, qui les
+calcule ; « 268 » complète donc le code postal « 26800 »), géohash à 7
+caractères du document et de ses numéros, filtres `source`, `type`,
+`citycode`, `postcode` (plus `type=housenumber` pour les voies numérotées).
 
-**Étapes dans l'ordre :**
+## 3. Choix des candidats
 
-1. Conversion en minuscules : `value.lower()`
-2. Translittération Unicode → ASCII via `unidecode` (ex : `"é"` → `"e"`, `"ñ"` → `"n"`)
-3. Remplacement de tous les caractères non alphanumériques par des espaces : `re.sub(r"[^\w]", " ", text)`
-4. Suppression des espaces multiples : `re.sub(r" {2,}", " ", text).strip()`
+Les mots sont classés en *fréquents* (> 10 000 documents), *significatifs*
+(trouvés), *introuvables* ou *numéro*. Puis les 13 collecteurs d'addok 1.1
+s'enchaînent (voir `src/search/mod.rs`), dans cet ordre : intersection des
+mots significatifs (plus un mot fréquent s'il n'y en a qu'un), réduction par
+les mots fréquents tant qu'il y a plus de 100 candidats, autocomplete sur le
+dernier mot (candidats triés par meilleur document pour une requête d'un mot,
+par fréquence sinon), voisins fuzzy à une faute (substitutions limitées aux
+touches voisines d'un clavier AZERTY, validés par les paires), groupes de
+mots liés (les moins fréquents d'abord), puis retrait d'un, voire de deux
+mots. Les filtres acceptent jusqu'à 10 valeurs, combinées en OU. Un collecteur peut arrêter
+la chaîne, notamment dès qu'un candidat a un score textuel ≥ 0,9 parmi au
+plus 10.
 
-**Exemples :**
-```
-"Rue de l'Église"  →  "rue de l eglise"
-"Saint-Étienne"    →  "saint etienne"
-"Île-de-France"    →  "ile de france"
-```
+## 4. Score d'un résultat
 
-> Le résultat est mis en cache sur l'objet pour éviter les recalculs.
+`SEARCH_RESULT_PROCESSORS` :
 
----
+1. `match_housenumber` : si le numéro existe, le résultat prend ses
+   coordonnées et son id, et son type devient `housenumber` ; avec le filtre
+   `type=housenumber`, un résultat sans numéro trouvé est écarté ;
+2. `make_labels` (addok-france 1.2.0) : toutes les combinaisons
+   « [numéro] nom [code postal] [commune] » (et « code postal nom » pour une
+   commune), pour **chaque** commune de la liste : une adresse d'une commune
+   nouvelle se trouve aussi sous le nom de l'ancienne commune ;
+3. `score_by_importance` : `importance × 0,1`, plafond 0,1 ;
+4. `score_by_autocomplete_distance` (autocomplete actif, **défaut de l'API**) :
+   sur les libellés repliés en ASCII, 1,0 si égal à la requête, 0,9 s'il
+   commence par elle, 0,7 s'il la contient, **sur tous les libellés** (addok
+   1.0 s'arrêtait au premier ≥ 0,9) ; sinon repli sur les n-grammes × 0,9 ;
+5. `score_by_ngram_distance` (autocomplete inactif) : n-grammes × 1,0 ;
+6. `score_by_geo_distance` (si centre donné) : `0,1 × exp(-(km/50)²)`, 0
+   au-delà de 100 km, plafond 0,1. Distance haversine, rayon 6 367 km.
 
-## Fonctions de comparaison textuelle
+Chaque composante garde la meilleure valeur sur l'ensemble des libellés.
+Score final = Σ valeurs / Σ plafonds. Pas d'`adjust_scores` à la BAN.
+Les résultats sont triés, tronqués, puis ceux sous **0,3** (`MIN_SCORE` de
+la Géoplateforme) sont retirés.
 
-### `ngrams(text, n=3)` — `addok/helpers/text.py:158`
+La Géoplateforme demande toujours **au moins 10 résultats** à addok
+(`api/indexes/address.js` : `Math.max(params.limit || 10, 10)`), puis ne
+renvoie que les `limit` meilleurs. Ce n'est pas qu'une question
+d'affichage : les collecteurs raisonnent sur ce nombre (bucket « plein » ou
+« à sec »), donc une requête avec `limit=5` peut déclencher un fuzzy qu'addok
+seul, avec 5, n'aurait pas tenté. geocoder-core fait de même
+(`Profile::min_limit`).
 
-Génère l'ensemble des n-grammes d'une chaîne, avec padding d'un espace de chaque côté.
+### Similarité n-grammes
 
-```
-text_padded = " " + text + " "
-ngrams = { text_padded[i:i+n]  pour i dans range(0, len(text_padded) - (n-1)) }
-```
-
-**Paramètre :** `n=3` (trigrammes de caractères).  
-**Résultat :** un `set` de chaînes de longueur 3.
-
-**Exemple :**
-```
-ngrams("rue") = {" ru", "rue", "ue "}
-ngrams("paris") = {" pa", "par", "ari", "ris", "is "}
-```
-
----
-
-### `compare_str(label, query)` — `addok/helpers/text.py:175`
-
-Comparaison hybride basée sur les 3-grammes et la distance d'édition.  
-Les deux chaînes sont d'abord ASCII-foldées.
-
-**Formule :**
-
-```
-left  = ascii(label)
-right = ascii(query)
-
-left_n  = ngrams(left)   # set de 3-grammes du label
-right_n = ngrams(right)  # set de 3-grammes de la requête
-
-inter = |left_n ∩ right_n|
-
-# Distance d'édition normalisée sur la portion commune
-distance = (editdistance(left, right) - |len(left) - len(right)|) / max(len(left), len(right))
-
-score = inter / |right_n| * 0.85
-      + inter / |left_n|  * 0.05
-      + (1 - distance)    * 0.10
-```
-
-**Décomposition des poids :**
-
-| Composante | Poids | Description |
-|-----------|-------|-------------|
-| Rappel n-grammes | 0.85 | Fraction des 3-grammes de la **requête** présents dans le label |
-| Précision n-grammes | 0.05 | Fraction des 3-grammes du **label** présents dans la requête |
-| Distance d'édition | 0.10 | `1 - distance_normalisée` |
-
-> `editdistance` : distance de Levenshtein (bibliothèque `editdistance`).
-
----
-
-### `compare_ngrams(label, query, N=2, pad_len=0)` — `addok/helpers/text.py:165`
-
-Comparaison par bigrammes via la bibliothèque `ngram` (Dice coefficient).  
-Les deux chaînes sont d'abord ASCII-foldées.
-
-**Cas spécial :** si les deux chaînes font exactement 1 caractère, retourne `1.0` si égales, `0.0` sinon (NGram.compare retournerait toujours 0 pour des chaînes à 1 caractère).
-
-**Formule générale (Dice sur les bigrammes) :**
-
-```
-left  = ascii(label)
-right = ascii(query)
-
-bigrammes_left  = tous les bigrammes de left
-bigrammes_right = tous les bigrammes de right
-
-score = 2 * |bigrammes_left ∩ bigrammes_right| / (|bigrammes_left| + |bigrammes_right|)
-```
-
-> C'est le coefficient de Dice/Sørensen appliqué aux bigrammes.  
-> `NGram.compare` avec `pad_len=0` : aucun padding ajouté.  
-> C'est cette fonction (bigrammes) qui est utilisée dans le pipeline par défaut.
-
----
-
-## Fonctions de scoring
-
-### Étape 1 — `match_housenumber` (`results.py:32`)
-
-Tente de faire correspondre les tokens numéro-de-rue de la requête avec les données du résultat.
-
-- Les tokens housenumber sont concaténés dans leur ordre de position.
-- Si une correspondance est trouvée dans `result.housenumbers`, le résultat est mis à jour.
-- Si `helper.only_housenumber=True` et qu'aucune correspondance n'est trouvée, retourne `False` → résultat éliminé.
-
-**N'affecte pas directement les scores**, mais peut éliminer un résultat ou modifier ses coordonnées/type.
-
----
-
-### Étape 2 — `make_labels` (`results.py:13`)
-
-Construit la liste `result.labels` utilisée pour toutes les comparaisons textuelles.
-
-**Algorithme :**
+`NGram.compare(libellé, requête, N=2, pad_len=0)` (bibliothèque `ngram`
+4.0.3) : bigrammes sans bourrage,
 
 ```
-label = result[NAME_FIELD][0]  # ex : "Rue de la Paix"
-
-if city exists AND city != label:
-    if postcode exists:
-        label = label + " " + postcode
-    label = label + " " + city
-    # ex : "Rue de la Paix 75001 Paris"
-
-if housenumber exists:
-    label = housenumber + " " + label
-    # ex : "12 Rue de la Paix 75001 Paris"
-
-result.labels[0] = label   # remplace le premier label
-# les autres valeurs brutes du champ NAME_FIELD restent dans labels[1:]
+commun = bigrammes partagés, comptés avec multiplicité
+score  = commun / (bigrammes(libellé) + bigrammes(requête) − commun)
 ```
 
----
-
-### Étape 3 — `score_by_importance` (`results.py:51`)
-
-```
-importance_value = float(result.importance) or 0.0
-
-score    = importance_value * IMPORTANCE_WEIGHT
-ceiling  = IMPORTANCE_WEIGHT
-
-result._scores["importance"] = (score, ceiling)
-```
-
-**Valeurs par défaut :** `IMPORTANCE_WEIGHT = 0.1`  
-**Plage de score :** `[0, 0.1]`
-
-> `result.importance` vient du document indexé. Si absent ou nul, vaut `0.0`.
-
----
-
-### Étape 4 — `score_by_autocomplete_distance` (`results.py:60`)
-
-**Uniquement activée si `helper.autocomplete = True`.**  
-Si autocomplete est `False`, la fonction retourne immédiatement sans rien faire.
-
-Pour chaque label (après ASCII folding de la **requête** et du **label**) :
-
-| Condition | Score |
-|-----------|-------|
-| `label == query` (égalité exacte) | `1.0` |
-| `label.startswith(query)` (le label commence par la requête) | `0.9` |
-| `query in label` (la requête est contenue dans le label) | `0.7` |
-
-- `ceiling = 1.0`
-- Les conditions sont évaluées **dans cet ordre**. La première vraie s'applique.
-- Seul le **meilleur score** est conservé (via `add_score`, cf. ci-dessous).
-- Si **aucun des labels** ne satisfait une condition, on repasse sur `_score_by_ngram_distance` avec `scale=0.9` (fallback bigrammes ×0.9).
-
----
-
-### Étape 5 — `score_by_ngram_distance` (`results.py:101`)
-
-**Uniquement activée si `helper.autocomplete = False`.**  
-Si autocomplete est `True`, la fonction retourne immédiatement.
-
-Appelle `_score_by_ngram_distance(helper, result, scale=1.0)` :
-
-```python
-for label in result.labels:
-    label = ascii(label)
-    score = compare_ngrams(label, helper.query) * scale
-    result.add_score("str_distance", score, ceiling=1.0)
-    if score >= MATCH_THRESHOLD:
-        break   # arrêt anticipé si score suffisamment bon
-```
-
-- `scale = 1.0` en mode normal
-- **Arrêt anticipé** si le score dépasse `MATCH_THRESHOLD = 0.9`
-
----
-
-### Étape 6 — `score_by_geo_distance` (`results.py:107`)
-
-**Uniquement activée si `helper.lat` et `helper.lon` sont fournis.**
-
-```python
-km = haversine_distance((result.lat, result.lon), (helper.lat, helper.lon))
-result.distance = km * 1000   # stocké en mètres pour l'affichage
-
-score   = km_to_score(km) * GEO_DISTANCE_WEIGHT
-ceiling = GEO_DISTANCE_WEIGHT
-
-result._scores["geo_distance"] = (score, ceiling)
-```
-
-**`haversine_distance((lat1, lon1), (lat2, lon2))` — `helpers/__init__.py:73`**
-
-```
-lon1, lat1, lon2, lat2 = en radians
-
-dlon = lon2 - lon1
-dlat = lat2 - lat1
-
-a = sin(dlat/2)² + cos(lat1) × cos(lat2) × sin(dlon/2)²
-c = 2 × arcsin(√a)
-
-km = 6367 × c
-```
-
-> Rayon terrestre utilisé : **6367 km**.
-
-**`km_to_score(km)` — `helpers/__init__.py:95`**
-
-```
-si km > 100 : retourner 0.0
-sinon       : retourner exp(-( km / 50.0 )²)
-```
-
-Courbe gaussienne centrée en 0 km, décroissante :
-
-| Distance | `km_to_score` | Score final (× 0.1) |
-|----------|--------------|---------------------|
-| 0 km | 1.000 | 0.100 |
-| 10 km | 0.960 | 0.096 |
-| 25 km | 0.779 | 0.078 |
-| 50 km | 0.368 | 0.037 |
-| 75 km | 0.105 | 0.011 |
-| 100 km | 0.018 | 0.002 |
-| > 100 km | 0.000 | 0.000 |
-
-**Valeur par défaut :** `GEO_DISTANCE_WEIGHT = 0.1`  
-**Plage de score :** `[0, 0.1]`
-
----
-
-### Étape 7 — `adjust_scores` (`results.py:121`)
-
-**Uniquement activée si `helper.lat` et `helper.lon` sont fournis** (même condition que l'étape 6).
-
-Quand des coordonnées sont fournies, la distance géographique devient plus importante, donc les autres composantes sont réévaluées à la baisse :
-
-```python
-if "str_distance" in result._scores:
-    (score, ceiling) = result._scores["str_distance"]
-    result._scores["str_distance"] = (score * 0.9, ceiling)   # × 0.9
-
-if "importance" in result._scores:
-    (score, ceiling) = result._scores["importance"]
-    result._scores["importance"] = (score * 0.1, ceiling)     # × 0.1
-```
-
-> Attention : seule la **valeur** est modifiée, pas le **plafond** (*ceiling*). Le plafond reste inchangé, ce qui dilue le poids effectif de ces composantes dans l'agrégation finale.
-
----
-
-## Agrégation du score final
-
-### `add_score(name, score, ceiling)` — `core.py:92`
-
-À chaque fois qu'une composante est mise à jour, seul le **score le plus élevé** est conservé :
-
-```python
-if score >= current_score_for_name:
-    _scores[name] = (score, ceiling)
-```
-
-Cela signifie que si plusieurs labels sont comparés, seul le meilleur score par composante est retenu.
-
-### `result.score` — `core.py:96`
-
-```python
-score_final = Σ(scores) / Σ(ceilings)
-```
-
-Où `_scores` est un dictionnaire `{name: (valeur, plafond)}`.
-
-**Exemple avec toutes les composantes actives et coordonnées fournies :**
-
-```
-_scores = {
-  "importance":   (0.050 × 0.1, 0.1)  →  (0.005, 0.1)   → après adjust: (0.0005, 0.1)
-  "str_distance": (0.82,        1.0)               → après adjust: (0.738,  1.0)
-  "geo_distance": (0.960 × 0.1, 0.1)  →  (0.096, 0.1)
-}
-
-score_final = (0.0005 + 0.738 + 0.096) / (0.1 + 1.0 + 0.1)
-            = 0.8345 / 1.2
-            = 0.695
-```
-
-### Seuil de score minimum
-
-Les résultats avec `score_final < MIN_SCORE` sont exclus de la réponse.  
-**Valeur par défaut :** `MIN_SCORE = 0.1`
-
-### Score forcé
-
-Si `result.score` est défini manuellement via le setter (ex : par un plugin), la valeur explicite est retournée directement, sans calcul. Par défaut, `_score` est `""` (chaîne vide), ce qui déclenche le calcul automatique.
-
----
-
-## Paramètres de configuration (valeurs par défaut)
-
-Source : `addok/config/default.py`
-
-### Poids de scoring
-
-| Paramètre | Valeur | Rôle |
-|-----------|--------|------|
-| `IMPORTANCE_WEIGHT` | `0.1` | Plafond et poids du score d'importance |
-| `GEO_DISTANCE_WEIGHT` | `0.1` | Plafond et poids du score géographique |
-| `DEFAULT_BOOST` | `1.0` | Score de boost par défaut token→document à l'indexation |
-
-### Seuils
-
-| Paramètre | Valeur | Rôle |
-|-----------|--------|------|
-| `MATCH_THRESHOLD` | `0.9` | Seuil d'arrêt anticipé dans `_score_by_ngram_distance` |
-| `MIN_SCORE` | `0.1` | Score minimum pour inclure un résultat |
-| `COMMON_THRESHOLD` | `10000` | Fréquence au-delà de laquelle un token est "commun" |
-| `INTERSECT_LIMIT` | `100000` | Au-delà, on évite les intersections de sets Redis |
-
-### Récupération des résultats
-
-| Paramètre | Valeur | Rôle |
-|-----------|--------|------|
-| `BUCKET_MIN` | `10` | Nombre minimum de documents à récupérer et scorer |
-| `BUCKET_MAX` | `100` | Nombre maximum de documents à récupérer et scorer |
-
-### Traitement textuel
-
-| Paramètre | Valeur | Rôle |
-|-----------|--------|------|
-| `MIN_EDGE_NGRAMS` | `3` | Longueur minimale des edge n-grammes (autocomplete) |
-| `MAX_EDGE_NGRAMS` | `20` | Longueur maximale des edge n-grammes |
-| `QUERY_MAX_LENGTH` | `200` | Longueur maximale de la requête (en caractères) |
-
-### Champs indexés (avec boost)
-
-| Champ | Boost | Obligatoire |
-|-------|-------|-------------|
-| `name` | `4` | Oui (`null: False`) |
-| `street` | `1.0` (défaut) | Non |
-| `postcode` | `1.2` si type=`municipality`, sinon `1.0` | Non |
-| `city` | `1.0` (défaut) | Non |
-| `housenumbers` | — (indexé séparément) | Non |
-| `context` | `1.0` (défaut) | Non |
-
----
-
-## Boost à l'indexation
-
-Source : `addok/helpers/index.py:30` (`extract_tokens`) et `addok/helpers/index.py:123` (`FieldsIndexer.index`)
-
-Le boost d'un token dans le sorted set Redis est calculé ainsi :
-
-```python
-importance = float(doc.get("importance", 0.0)) * IMPORTANCE_WEIGHT
-
-for field in FIELDS:
-    boost = field.get("boost", DEFAULT_BOOST)    # ex: 4 pour "name"
-    if callable(boost):
-        boost = boost(doc)                        # ex: lambda pour postcode
-    boost = boost + importance                    # ajout de l'importance du doc
-
-    els = preprocess(field_value)                 # tokenisation + normalisation
-    token_boost = DEFAULT_BOOST / len(els) * boost
-
-    # Pour chaque token, on ne garde que le boost max déjà vu
-    if token_boost > tokens.get(token, 0):
-        tokens[token] = token_boost
-```
-
-Le boost est ensuite stocké comme score dans le sorted set Redis : `ZADD token_key {doc_key: boost}`.
-
-> Ce boost conditionne l'**ordre de récupération** des candidats (quels documents sont renvoyés pour un token donné), mais n'affecte pas directement le score de pertinence calculé à l'étape de scoring.
-
----
-
-## Pipeline de géocodage inverse
-
-Source : `addok/config/default.py:102` (`REVERSE_RESULT_PROCESSORS_PYPATHS`)
-
-Pour le géocodage inverse (recherche par coordonnées), seules trois étapes sont appliquées :
-
-| Étape | Fonction | Description |
-|-------|----------|-------------|
-| 1 | `load_closer` | Trouve le numéro de rue le plus proche des coordonnées |
-| 2 | `make_labels` | Génère les labels d'affichage |
-| 3 | `score_by_geo_distance` | Score uniquement par distance géographique |
-
-Pas de scoring textuel. Le score final = `km_to_score(km) * GEO_DISTANCE_WEIGHT / GEO_DISTANCE_WEIGHT` = `km_to_score(km)`.
-
----
-
-## Exemple de calcul complet
-
-**Requête :** `"12 rue de la paix paris"` avec coordonnées `lat=48.8698, lon=2.3298`  
-**Résultat candidat :** document `{name: "Rue de la Paix", city: "Paris", postcode: "75001", importance: 0.5, lat: 48.8699, lon: 2.3301}`
-
-**Étape 1 — match_housenumber :**  
-Token `"12"` trouvé dans les housenumbers → `result.housenumber = "12"`, `result.type = "housenumber"`, coordonnées mises à jour sur le numéro.
-
-**Étape 2 — make_labels :**  
-`result.labels[0] = "12 Rue de la Paix 75001 Paris"`
-
-**Étape 3 — score_by_importance :**  
-`score = 0.5 × 0.1 = 0.05`, `ceiling = 0.1`  
-→ `_scores["importance"] = (0.05, 0.1)`
-
-**Étape 4 — score_by_autocomplete_distance :**  
-`helper.autocomplete = False` → retour immédiat, rien.
-
-**Étape 5 — score_by_ngram_distance :**  
-`compare_ngrams(ascii("12 Rue de la Paix 75001 Paris"), ascii("12 rue de la paix paris"))`  
-= `compare_ngrams("12 rue de la paix 75001 paris", "12 rue de la paix paris")`  
-≈ `0.93` (score élevé, arrêt anticipé car ≥ 0.9)  
-→ `_scores["str_distance"] = (0.93, 1.0)`
-
-**Étape 6 — score_by_geo_distance :**  
-`km = haversine_distance(...)` ≈ `0.025 km`  
-`km_to_score(0.025) = exp(-(0.025/50)²) ≈ 1.000`  
-`score = 1.000 × 0.1 = 0.100`, `ceiling = 0.1`  
-→ `_scores["geo_distance"] = (0.100, 0.1)`
-
-**Étape 7 — adjust_scores (lat/lon présents) :**  
-`_scores["str_distance"] = (0.93 × 0.9, 1.0) = (0.837, 1.0)`  
-`_scores["importance"]   = (0.05 × 0.1, 0.1) = (0.005, 0.1)`
-
-**Score final :**
-```
-numerateur   = 0.837 + 0.005 + 0.100 = 0.942
-denominateur = 1.0   + 0.1   + 0.1   = 1.2
-
-score_final  = 0.942 / 1.2 = 0.785
-```
-
----
-
-## Dépendances bibliothèques
-
-| Bibliothèque | Usage |
-|-------------|-------|
-| `unidecode` | Translittération Unicode → ASCII |
-| `editdistance` | Distance de Levenshtein |
-| `ngram` (classe `NGram`) | Coefficient de Dice sur bigrammes |
-| `geohash` | Encodage/décodage géohash (précision 7 par défaut) |
+C'est un Jaccard sur multiensembles, pas un Dice. Deux chaînes d'un seul
+caractère valent 1 si égales ; sans bigramme commun, 0.
+
+### Exemple
+
+« 42 rue de rivoli paris » contre la rue de Rivoli (75004, importance 0,7),
+numéro 42 présent : le libellé « 42 Rue de Rivoli 75004 Paris » ne matche
+pas, mais « 42 Rue de Rivoli Paris » est égal à la requête → 1,0.
+Score = (1,0 + 0,07) / (1,0 + 0,1) = 0,9727.

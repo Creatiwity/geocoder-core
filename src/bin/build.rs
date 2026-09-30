@@ -1,40 +1,53 @@
-use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
+use std::time::Instant;
 
-use flate2::read::GzDecoder;
-use geocoder_core::{Document, GeocoderError, HouseNumber, IndexBuilder};
-use serde::{Deserialize, Deserializer};
+use flate2::read::MultiGzDecoder;
+use geocoder_core::readers::Source;
+use geocoder_core::{GeocoderError, IndexBuilder, profile};
+
+const USAGE: &str = "usage: geocoder-build [--source addok|bano] [--profile fr|default] <url|path[.gz]> <output.bin>
+
+  --source   input format: addok (BAN exports, default) or bano
+  --profile  text processing profile stored in the index (default: fr)";
 
 fn main() -> Result<(), GeocoderError> {
     let mut args = std::env::args().skip(1);
-
-    let mut format: Option<String> = None;
+    let mut source: Option<Source> = None;
+    let mut profile_name = "fr".to_string();
     let mut positional: Vec<String> = Vec::new();
     while let Some(arg) = args.next() {
-        if arg == "--format" {
-            format = Some(args.next().expect("--format requires a value"));
-        } else {
-            positional.push(arg);
+        match arg.as_str() {
+            "--source" | "--format" => {
+                let name = args.next().unwrap_or_default();
+                source = Some(
+                    Source::from_name(&name)
+                        .unwrap_or_else(|| exit(&format!("unknown source {name}"))),
+                );
+            }
+            "--profile" => profile_name = args.next().unwrap_or_default(),
+            "-h" | "--help" => exit(""),
+            _ => positional.push(arg),
         }
     }
-
-    if positional.len() < 2 {
-        eprintln!("usage: geocoder-build [--format bano|native] <url|path> <output.bin>");
-        std::process::exit(1);
-    }
-    let input = &positional[0];
-    let output_path: PathBuf = positional[1].clone().into();
-
-    let is_bano = match format.as_deref() {
-        Some("bano") => true,
-        Some("native") => false,
-        _ => input.contains(".sjson") || input.contains("bano"),
+    let [input, output] = positional.as_slice() else {
+        exit("")
     };
+    let source = source.unwrap_or(if input.contains("bano") {
+        Source::Bano
+    } else {
+        Source::Addok
+    });
+    let profile = profile::by_name(&profile_name).unwrap_or_else(|| {
+        exit(&format!(
+            "unknown profile {profile_name}, known: {:?}",
+            profile::names()
+        ))
+    });
+    let output: PathBuf = output.into();
 
-    let is_gz = input.ends_with(".gz");
     let raw: Box<dyn Read> = if input.starts_with("http://") || input.starts_with("https://") {
-        eprintln!("streaming from {}...", input);
+        eprintln!("streaming {input}");
         let response = ureq::get(input)
             .call()
             .map_err(|e| GeocoderError::Io(std::io::Error::other(e.to_string())))?;
@@ -42,149 +55,55 @@ fn main() -> Result<(), GeocoderError> {
     } else {
         Box::new(std::fs::File::open(input)?)
     };
+    let reader: Box<dyn Read> = if input.ends_with(".gz") {
+        Box::new(MultiGzDecoder::new(raw))
+    } else {
+        raw
+    };
+    let reader = BufReader::with_capacity(1 << 20, reader);
 
-    let reader: Box<dyn Read> = if is_gz { Box::new(GzDecoder::new(raw)) } else { raw };
-    let reader = BufReader::new(reader);
-
-    let mut builder = IndexBuilder::new();
-    let mut count = 0usize;
-
+    let started = Instant::now();
+    let mut builder = IndexBuilder::new(profile);
+    let mut invalid = 0usize;
     for (line_no, line) in reader.lines().enumerate() {
         let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let doc = if is_bano {
-            match parse_bano_line(&line) {
-                Ok(d) => d,
-                Err(e) => {
-                    let preview = line.get(..120).unwrap_or(&line);
-                    eprintln!("line {}: {} | snippet: {}…", line_no + 1, e, preview);
-                    continue;
+        match source.parse(&line) {
+            Ok(Some(doc)) => {
+                builder.add_document(doc)?;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                invalid += 1;
+                if invalid <= 10 {
+                    eprintln!("line {}: {e}", line_no + 1);
                 }
             }
-        } else {
-            serde_json::from_str::<Document>(&line).map_err(|e| {
-                eprintln!("line {}: {}", line_no + 1, e);
-                GeocoderError::Json(e)
-            })?
-        };
-
-        builder.add_document(doc)?;
-        count += 1;
-        if count % 100_000 == 0 {
-            eprintln!("indexed {} documents...", count);
+        }
+        if (line_no + 1) % 200_000 == 0 {
+            eprintln!(
+                "{} lines, {} indexed, {:?}",
+                line_no + 1,
+                builder.documents(),
+                started.elapsed()
+            );
         }
     }
-
-    eprintln!("building index ({} documents)...", count);
-    builder.build(&output_path)?;
-    eprintln!("done → {}", output_path.display());
+    eprintln!(
+        "{} documents indexed, {} skipped, {} invalid lines, writing {}",
+        builder.documents(),
+        builder.skipped(),
+        invalid,
+        output.display()
+    );
+    builder.build(&output)?;
+    eprintln!("done in {:?}", started.elapsed());
     Ok(())
 }
 
-// ── BANO format ──────────────────────────────────────────────────────────────
-
-/// Accepts either a bare string or an array of strings (BANO sends both for
-/// postcode/city when a street spans multiple municipalities).
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum StringOrVec {
-    One(String),
-    Many(Vec<String>),
-}
-
-impl StringOrVec {
-    fn into_vec(self) -> Vec<String> {
-        match self {
-            StringOrVec::One(s) => vec![s],
-            StringOrVec::Many(v) => v,
-        }
+fn exit(message: &str) -> ! {
+    if !message.is_empty() {
+        eprintln!("{message}");
     }
-}
-
-
-#[derive(Deserialize)]
-struct BanoDoc {
-    name: String,
-    lat: f64,
-    lon: f64,
-    #[serde(default)]
-    importance: f32,
-    #[serde(rename = "type", default)]
-    doc_type: String,
-    #[serde(default, deserialize_with = "deserialize_opt_string_or_vec")]
-    postcode: Vec<String>,
-    #[serde(default, deserialize_with = "deserialize_opt_string_or_vec")]
-    city: Vec<String>,
-    #[serde(default, deserialize_with = "deserialize_opt_string_or_vec")]
-    citycode: Vec<String>,
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_opt_string_or_vec")]
-    street: Vec<String>,
-    #[serde(default)]
-    housenumbers: HashMap<String, BanoHn>,
-}
-
-fn deserialize_opt_string_or_vec<'de, D>(de: D) -> Result<Vec<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    // Field is optional: missing → empty vec, present → one or many
-    let opt = Option::<StringOrVec>::deserialize(de)?;
-    Ok(opt.map(|s| s.into_vec()).unwrap_or_default())
-}
-
-#[derive(Deserialize)]
-struct BanoHn {
-    lat: f64,
-    lon: f64,
-}
-
-fn parse_bano_line(line: &str) -> Result<Document, serde_json::Error> {
-    let bano: BanoDoc = serde_json::from_str(line)?;
-
-    let housenumbers = bano
-        .housenumbers
-        .into_iter()
-        .map(|(number, hn)| HouseNumber { number, lat: hn.lat, lon: hn.lon })
-        .collect();
-
-    let mut filters = HashMap::new();
-    if !bano.doc_type.is_empty() {
-        filters.insert("type".to_string(), bano.doc_type);
-    }
-    // When multiple postcodes, keep the first as the filter value.
-    // All values end up indexed via housenumber geohashes anyway.
-    if let Some(p) = bano.postcode.into_iter().next() {
-        filters.insert("postcode".to_string(), p);
-    }
-
-    let mut extra: HashMap<String, serde_json::Value> = HashMap::new();
-    // city / street: join multiple values with " / " so the index sees both names
-    // Store only the primary city name (first element); the rest are districts/aliases.
-    if let Some(first_city) = bano.city.into_iter().next() {
-        extra.insert("city".to_string(), serde_json::Value::String(first_city));
-    }
-    if !bano.street.is_empty() {
-        extra.insert("street".to_string(), serde_json::Value::String(bano.street.join(" / ")));
-    }
-    if let Some(id) = bano.id {
-        extra.insert("id".to_string(), serde_json::Value::String(id));
-    }
-    if !bano.citycode.is_empty() {
-        extra.insert("citycode".to_string(), serde_json::Value::String(bano.citycode.join(",")));
-    }
-
-    Ok(Document {
-        name: bano.name,
-        lat: bano.lat,
-        lon: bano.lon,
-        importance: bano.importance,
-        housenumbers,
-        filters,
-        extra,
-    })
+    eprintln!("{USAGE}");
+    std::process::exit(1)
 }
