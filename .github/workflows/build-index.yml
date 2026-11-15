@@ -15,9 +15,11 @@ name: Indexes
 # Publishes from main only (schedule, or by hand). Elsewhere, e.g. on a
 # change of this file, it builds and checks with a throwaway key.
 #
-# Repository secrets: INDEX_SIGNING_KEY (`geocoder-api keygen`),
-# S3_ENDPOINT, S3_REGION, S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY.
-# Repository variable: INDEX_BASE_URL, the public URL of the bucket.
+# Secrets of the `index` environment: INDEX_SIGNING_KEY (`geocoder-api
+# keygen`), S3_ENDPOINT, S3_REGION, S3_BUCKET, S3_ACCESS_KEY_ID,
+# S3_SECRET_ACCESS_KEY. Variable (environment or repository):
+# INDEX_BASE_URL, the public URL of the bucket. Restrict the environment to
+# the main branch: other runs do not use it.
 
 on:
   schedule:
@@ -62,6 +64,8 @@ jobs:
     needs: binary
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    # The secrets only when publishing.
+    environment: ${{ github.ref == 'refs/heads/main' && github.event_name != 'push' && 'index' || '' }}
     # One job per country: its own runner, so its own peak memory.
     strategy:
       fail-fast: false
