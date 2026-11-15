@@ -1,0 +1,20 @@
+{{- if not .Values.persistence.existingClaim -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "app.dataClaim" . }}
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+  annotations:
+    # The indexes take minutes to rebuild: keep them across uninstalls.
+    "helm.sh/resource-policy": keep
+spec:
+  accessModes:
+    {{- toYaml .Values.persistence.accessModes | nindent 4 }}
+  {{- with .Values.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+{{- end }}

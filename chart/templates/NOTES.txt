@@ -1,0 +1,15 @@
+geocoder-api serves: {{ include "app.countries" . }} (default: {{ .Values.defaultCountry | default (first (splitList "," (include "app.countries" .))) }}).
+
+{{- if .Release.IsInstall }}
+
+The indexes are not built yet: searches answer 503 until then. Build them now
+rather than waiting for the schedule ({{ .Values.update.schedule }}):
+
+  kubectl -n {{ .Release.Namespace }} create job --from=cronjob/{{ include "app.fullname" . }}-update {{ include "app.fullname" . }}-init
+{{- end }}
+
+Check what is loaded:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "app.fullname" . }} 8080:{{ .Values.service.port }}
+  curl localhost:8080/countries
+  curl 'localhost:8080/search?q=8+bd+du+port&country=fr'

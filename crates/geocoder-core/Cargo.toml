@@ -1,6 +1,6 @@
 [package]
 name = "geocoder-core"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 description = "Address geocoding ported from addok, with per-country profiles (French BAN profile included)"
 license.workspace = true
