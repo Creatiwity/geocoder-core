@@ -4,10 +4,20 @@
 //! Every country has built-in defaults (source, profile, attribution), so
 //! `GEOCODER_COUNTRIES=fr,lu,be` is enough; `GEOCODER_SOURCE_URLS_<CC>`
 //! overrides a country's source (comma separated URLs or local paths).
+//!
+//! With `GEOCODER_INDEX_BASE_URL`, `update` downloads prebuilt indexes
+//! instead (`<base>/v<format>/<cc>.json`, a signed manifest, and the index
+//! it names), accepted only when signed by one of the trusted keys. The
+//! format version in the path lets builds of several formats coexist.
 
 use std::path::{Path, PathBuf};
 
 use geocoder_core::readers::Source;
+use geocoder_core::signed::PublicKey;
+
+/// Keys trusted by default to sign prebuilt indexes (the CI's), hex
+/// encoded. `GEOCODER_INDEX_PUBLIC_KEYS` replaces them, e.g. for a rotation.
+pub const TRUSTED_KEYS: &[&str] = &[];
 
 #[derive(Debug, Clone)]
 pub struct Country {
@@ -78,6 +88,54 @@ pub enum ConfigError {
     Empty,
     #[error("default country {0} is not among the configured ones")]
     DefaultNotConfigured(String),
+    #[error("invalid public key {0}")]
+    PublicKey(String),
+    #[error("GEOCODER_INDEX_BASE_URL is set but no public key is trusted")]
+    NoTrustedKey,
+}
+
+/// Where prebuilt indexes come from, and who may sign them.
+#[derive(Debug, Clone)]
+pub struct Prebuilt {
+    /// `<GEOCODER_INDEX_BASE_URL>/v<index format version>`.
+    pub base_url: String,
+    pub keys: Vec<PublicKey>,
+}
+
+impl Prebuilt {
+    /// `keys`: comma separated, hex; `None` for the built-in ones.
+    pub fn new(base_url: &str, keys: Option<&str>) -> Result<Option<Self>, ConfigError> {
+        let base_url = base_url.trim().trim_end_matches('/');
+        if base_url.is_empty() {
+            return Ok(None);
+        }
+        let keys: Vec<&str> = match keys {
+            Some(keys) => keys
+                .split(',')
+                .map(str::trim)
+                .filter(|k| !k.is_empty())
+                .collect(),
+            None => TRUSTED_KEYS.to_vec(),
+        };
+        let keys = keys
+            .into_iter()
+            .map(|k| k.parse().map_err(|_| ConfigError::PublicKey(k.to_string())))
+            .collect::<Result<Vec<PublicKey>, _>>()?;
+        if keys.is_empty() {
+            return Err(ConfigError::NoTrustedKey);
+        }
+        Ok(Some(Self {
+            base_url: format!("{base_url}/v{}", geocoder_core::index::format::VERSION),
+            keys,
+        }))
+    }
+
+    pub fn from_env() -> Result<Option<Self>, ConfigError> {
+        Self::new(
+            &std::env::var("GEOCODER_INDEX_BASE_URL").unwrap_or_default(),
+            std::env::var("GEOCODER_INDEX_PUBLIC_KEYS").ok().as_deref(),
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -175,5 +233,19 @@ mod tests {
         assert!(Config::new("fr,xx", None, Path::new("/d"), |_| None).is_err());
         assert!(Config::new("fr", Some("be"), Path::new("/d"), |_| None).is_err());
         assert!(Config::new("", None, Path::new("/d"), |_| None).is_err());
+    }
+
+    #[test]
+    fn prebuilt() {
+        let key = geocoder_core::signed::SigningKey::from_seed([1; 32]).public_key();
+        assert!(Prebuilt::new(" ", None).unwrap().is_none());
+        let p = Prebuilt::new("https://x/", Some(&format!(" {key} ,")))
+            .unwrap()
+            .unwrap();
+        let format = geocoder_core::index::format::VERSION;
+        assert_eq!(p.base_url, format!("https://x/v{format}"));
+        assert_eq!(p.keys, [key]);
+        assert!(Prebuilt::new("https://x", Some("nope")).is_err());
+        assert!(Prebuilt::new("https://x", Some("")).is_err());
     }
 }
