@@ -1,66 +1,163 @@
+<div align="center">
+
 # geocoder-core
 
-Address geocoding in Rust, ported from [addok](https://github.com/addok/addok)
-to be embedded in other services (e.g. siren), or served on its own by
-`geocoder-api` (France, Luxembourg, Belgium). The reference behaviour is
-the BAN API as served by the Géoplateforme (IGN): addok 1.3 + addok-fr
-1.1.0 + addok-france 1.2.0 with its address index configuration (see
-`SCORING.md`).
+**Address geocoding and autocomplete for France, Luxembourg and Belgium, in Rust.**
 
-## Layout
+A faithful port of [addok](https://github.com/addok/addok), the engine of the
+French national address API, as a library and as a ready-to-run HTTP API.
 
-| Part | Role |
+[![crates.io](https://img.shields.io/crates/v/geocoder-core.svg)](https://crates.io/crates/geocoder-core)
+[![docs.rs](https://img.shields.io/docsrs/geocoder-core)](https://docs.rs/geocoder-core)
+[![CI](https://github.com/Creatiwity/geocoder-core/actions/workflows/ci.yml/badge.svg)](https://github.com/Creatiwity/geocoder-core/actions/workflows/ci.yml)
+[![Docker](https://img.shields.io/docker/v/creatiwity/geocoder-api?label=docker&sort=semver)](https://hub.docker.com/r/creatiwity/geocoder-api)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+[Library](#the-library) · [HTTP API](#geocoder-api) · [Deployment](#deployment) · [Reliability](#reliability) · [Validation](#validation)
+
+</div>
+
+---
+
+## Why
+
+- 🎯 **The BAN API's answers, without the BAN API.** The ranking reproduces
+  addok 1.3 + addok-fr 1.1 + addok-france 1.2 with the Géoplateforme (IGN)
+  configuration, checked function by function against the Python code
+  ([`SCORING.md`](SCORING.md)).
+- ⚡ **3 ms per query, ~60 MB of memory.** The index is one memory-mapped
+  file (FSTs, roaring bitmaps): no Redis, no warm-up, only the pages queried
+  are read.
+- 🌍 **Three countries, one process.** France (BAN), Luxembourg
+  (BD-Adresses) and Belgium (BeST Address, in French, Dutch and German),
+  selected per request.
+- 🔄 **Always up to date.** `update` rebuilds an index only when its source
+  changed and the server reloads it without a restart.
+
+## At a glance
+
+| Part | What it is |
 |---|---|
-| `crates/geocoder-api` | HTTP API compatible with the BAN API, one index per country (see below) |
-| `chart` | Helm chart of `geocoder-api` |
-| `crates/geocoder-core/src/search` | Generic engine: addok's `Search` helper, its 13 collectors, result scoring |
-| `crates/geocoder-core/src/index` | Memory-mapped index: postings, token pairs, edge ngrams, geohashes, filters, documents |
-| `crates/geocoder-core/src/profile` | Country specific processing behind the `Profile` trait |
-| `crates/geocoder-core/src/readers` | Data sources converted to addok's document format |
-| `crates/geocoder-core/src/text` | Language-agnostic text primitives (ASCII folding, tokenizing, synonyms, ngrams) |
+| [`crates/geocoder-core`](crates/geocoder-core) | The library, [on crates.io](https://crates.io/crates/geocoder-core): index builder, search, reverse, country profiles |
+| [`crates/geocoder-api`](crates/geocoder-api) | HTTP API answering like `api-adresse.data.gouv.fr`, one index per country |
+| [`chart`](chart) | Helm chart of the API (Deployment, `update` CronJob, Gateway API routing) |
+| [`deploy/compose`](deploy/compose) | Docker Compose for a single host, behind Caddy |
 
-### Profiles
+## The library
 
-Everything that depends on how addresses are written goes through a
-`Profile`: query cleanup, token processing (housenumbers, synonyms,
-phonetics), labels, indexed fields and filters. Every method defaults to
-core addok's behaviour; a country overrides only what it needs.
+```toml
+[dependencies]
+geocoder-core = { version = "0.2", default-features = false }
+```
 
-- `default`: core addok (no phonetics, no synonyms).
-- `fr`: the Géoplateforme configuration (addok-fr phonetics and synonyms,
-  addok-france ordinals, housenumber detection, cedex/BP cleanup, labels,
-  `MIN_SCORE` 0.3).
-- `lu`, `be`: the French processing plus 4-digit postcodes ("L-1741",
-  "B-1000"), box numbers ("bte 3", "bus 2"), the housenumber after the
+```rust
+use geocoder_core::{Geocoder, SearchOpts};
+
+let geocoder = Geocoder::open("fr.bin".as_ref())?;
+let results = geocoder.search("42 rue de rivoli paris", SearchOpts::default());
+```
+
+Building an index, the profiles and the `geocoder-build` /
+`geocoder-search` binaries: see the [crate README](crates/geocoder-core/README.md).
+
+### Inside
+
+| Module | Role |
+|---|---|
+| `search` | addok's `Search` helper, its 13 collectors, result scoring |
+| `index` | Memory-mapped index: postings, token pairs, edge ngrams, geohashes, filters, documents |
+| `profile` | Everything country specific, behind the `Profile` trait |
+| `readers` | Data sources converted to addok's document format |
+| `text` | Language-agnostic primitives: ASCII folding, tokens, synonyms, ngrams |
+
+**Profiles.** Every `Profile` method defaults to core addok; a country
+overrides only what differs:
+
+- `default`: core addok, no phonetics, no synonyms.
+- `fr`: the Géoplateforme configuration: addok-fr phonetics and synonyms,
+  addok-france ordinals, housenumbers, cedex/BP cleanup, labels,
+  `MIN_SCORE` 0.3.
+- `lu`, `be`: the French processing plus 4-digit postcodes (`L-1741`,
+  `B-1000`), box numbers (`bte 3`, `bus 2`), the housenumber after the
   street, and an ordinal glued only before a postcode, a street type or
   nothing. `be` indexes every official language of the region, adds Dutch
-  abbreviations and labels "Rue de la Loi 16, 1000 Bruxelles" in the
+  abbreviations and labels `Rue de la Loi 16, 1000 Bruxelles` in the
   language closest to the query.
 
-The profile name and version are stored in the index; opening an index
-built with another version fails, since its tokens would no longer match.
+**Sources.** `addok` (the BAN export), `bano`, `lu` (`addresses.csv`) and
+`be` (one zip per region). Registers (`lu`, `be`) have one row per address:
+they are grouped into street, locality and municipality documents, each
+housenumber keeping its own postcode and city when they differ from its
+street's, with an importance derived from address counts.
 
-### Sources
+## geocoder-api
 
-- `addok` (default): addok's own format, e.g. the BAN export
-  `https://adresse.data.gouv.fr/data/ban/adresses/latest/addok/adresses-addok-france.ndjson.gz`.
-- `bano`: BANO files, normalized to the BAN types (`municipality`,
-  `street`, `locality`) and `context`.
-- `lu`: Luxembourg's [BD-Adresses](https://data.public.lu/fr/datasets/adresses-georeferencees-bd-adresses/)
-  (CC0, `addresses.csv`).
-- `be`: Belgium's [BeST Address](https://opendata.bosa.be/) (CC BY 4.0, one
-  zip per region: `openaddress-bevlg.zip`, `-bewal`, `-bebru`).
+One process, one index per country, answering like the BAN API: GeoJSON
+`FeatureCollection`s with the `attribution` and `licence` of each country.
 
-`lu` and `be` are registers, one row per address: they are grouped into
-street, locality and municipality documents (`readers::grouped`), a
-housenumber carrying its own postcode and city when they differ from its
-street's. Importance is derived from address counts (log scale).
+```bash
+export GEOCODER_COUNTRIES=fr,lu,be GEOCODER_DATA_DIR=data
+cargo run --release -p geocoder-api -- update        # downloads, builds what changed
+cargo run --release -p geocoder-api -- serve --port 8080
 
-### Reliability of `lu` and `be`
+curl 'localhost:8080/search?q=8+bd+du+port+nanterre'
+curl 'localhost:8080/search?q=wetstraat+16+brussel&country=be'
+curl 'localhost:8080/reverse?lat=49.6116&lon=6.1319&country=lu'
+```
 
-No reference API to compare with, unlike the BAN: `examples/roundtrip.rs`
-samples the register, writes each address several ways and checks that the
-first result is that address (within 30 m, housenumber matched).
+| Route | |
+|---|---|
+| `GET /search` | `q`, `limit`, `autocomplete`, `lat`, `lon`, `type`, `postcode`, `citycode`, `country` |
+| `GET /reverse` | `lat`, `lon`, `limit`, `type`, `postcode`, `citycode`, `country` |
+| `GET /countries` | Loaded indexes: documents, sources, build date |
+| `GET /scalar`, `/openapi.json` | Interactive documentation, OpenAPI 3.1 |
+| `GET /health/live`, `/health/ready` | Probes (ready: an index loaded once one is built, not shutting down) |
+
+<details>
+<summary><b>Configuration</b></summary>
+
+| Variable | Default | |
+|---|---|---|
+| `GEOCODER_COUNTRIES` | `fr` | Countries served, `<code>.bin` in the data dir |
+| `GEOCODER_DEFAULT_COUNTRY` | the first | Without `country` |
+| `GEOCODER_DATA_DIR` | `data` (`/data` in the image) | Indexes, sidecars, downloads |
+| `GEOCODER_SOURCE_URLS_<CC>` | built in | Comma separated URLs or paths, e.g. a mirror |
+| `GEOCODER_RELOAD_INTERVAL_SECONDS` | 60 | Index files checked for a new build |
+| `HOST` / `PORT` | `0.0.0.0` / 8080 (3000 in the image) | |
+| `SHUTDOWN_DELAY_SECONDS` | 5 | Readiness fails this long after SIGTERM |
+| `SENTRY_DSN`, `GEOCODER_ENV`, `RUST_LOG` | | |
+
+`update` skips a country whose sources did not change (`Last-Modified` /
+`ETag`, kept in `<code>.bin.source.json`) and writes the new index
+atomically.
+
+</details>
+
+## Deployment
+
+The image is [`creatiwity/geocoder-api`](https://hub.docker.com/r/creatiwity/geocoder-api)
+(distroless, non-root).
+
+| | Serving | Building an index |
+|---|---|---|
+| Memory | ~60 MB private, ~200 MB resident with fr+lu+be | ~5 GB (fr), ~4 GB (be) |
+| Time | ~3 ms per query | ~8 min (fr), ~2 min (be), seconds (lu) |
+| Disk | 2.9 GB of indexes | plus the download and the new index |
+
+- **Kubernetes**: the [Helm chart](chart) runs the API and an `update`
+  CronJob sharing a volume, with optional ListenerSet / HTTPRoute / auth
+  (kgateway or APISIX). After the first install, build the indexes once:
+  `kubectl create job --from=cronjob/<fullname>-update <fullname>-init`.
+- **A single host**: [Docker Compose](deploy/compose) with Caddy (HTTPS)
+  and a cron line for the updates.
+
+## Reliability
+
+**France** follows the BAN API (see [Validation](#validation)).
+**Luxembourg and Belgium** have no reference API:
+`examples/roundtrip.rs` samples the register, writes each address several
+ways and checks that the first result is that address (within 30 m,
+housenumber matched).
 
 | Written as | Luxembourg (3,000) | Belgium (4,000) |
 |---|---:|---:|
@@ -79,53 +176,14 @@ cargo run --release --example roundtrip -- --source be --sample 4000 --every 500
     --failures failures.tsv data/be.bin openaddress-bevlg.zip openaddress-bewal.zip openaddress-bebru.zip
 ```
 
-## Usage
-
-```bash
-cargo build --release
-./target/release/geocoder-build --source addok --profile fr \
-    data/adresses-addok-france.ndjson.gz data/index-ban.bin
-./target/release/geocoder-build --source be \
-    https://opendata.bosa.be/download/best/openaddress-bevlg.zip \
-    https://opendata.bosa.be/download/best/openaddress-bewal.zip \
-    https://opendata.bosa.be/download/best/openaddress-bebru.zip data/be.bin
-./target/release/geocoder-search data/index-ban.bin 42 rue de rivoli paris
-echo "bd haussmann paris" | ./target/release/geocoder-search --batch data/index-ban.bin
-
-# Trace the collectors, like addok's --verbose
-GEOCODER_DEBUG=1 ./target/release/geocoder-search data/index-ban.bin rebenac lag
-```
-
-### As a library
-
-```toml
-geocoder-core = { git = "https://github.com/Creatiwity/geocoder-core", tag = "v0.2.0", default-features = false }
-```
-
-```rust
-use geocoder_core::{Geocoder, SearchOpts, index, profile, readers::Source};
-
-// Build (atomic: written next to the target, then renamed).
-let reader = std::io::BufReader::new(flate2::read::MultiGzDecoder::new(std::fs::File::open(path)?));
-index::import(reader, Source::Addok, profile::by_name("fr").unwrap(), "index.bin".as_ref(), |_| {})?;
-
-// Query.
-let geocoder = Geocoder::open("index.bin".as_ref())?;
-let results = geocoder.search("42 rue de rivoli paris", SearchOpts::default());
-```
-
-The `cli` feature (on by default) only adds the `geocoder-build` and
-`geocoder-search` binaries.
-
 ## Validation
 
-Two levels, both against addok itself:
+Both levels run against addok itself.
 
-1. **Pipeline, function by function** — `scripts/addok_oracle.py` runs the
+1. **Pipeline, function by function.** `scripts/addok_oracle.py` runs the
    real addok code (tokens, index boosts, labels, scores) without Redis;
    `scripts/diff_pipeline.py` compares it with the Rust implementation
-   (`crates/geocoder-core/examples/pipeline.rs`) on documents sampled from a BAN export and
-   queries derived from them.
+   (`examples/pipeline.rs`) on documents sampled from a BAN export.
 
    ```bash
    uv venv -p 3.12 .oracle
@@ -135,8 +193,8 @@ Two levels, both against addok itself:
        --data data/adresses-addok-france.ndjson.gz --every 97 --max-docs 25000
    ```
 
-2. **End to end** — `scripts/compare_api.py` runs the same queries against
-   the BAN API and the Rust index, and reports how often the first result
+2. **End to end.** `scripts/compare_api.py` sends the same queries to the
+   BAN API and to the Rust index and reports how often the first result
    matches.
 
    ```bash
@@ -144,50 +202,22 @@ Two levels, both against addok itself:
        --data data/adresses-addok-france.ndjson.gz --sample 200
    ```
 
-## License
+Trace the collectors like addok's `--verbose`:
+`GEOCODER_DEBUG=1 geocoder-search data/fr.bin rebenac lag`.
 
-MIT. geocoder-core ports addok, addok-fr and addok-france (MIT, Etalab /
-DINUM); see `LICENSE`.
+## Contributing
 
-## geocoder-api
+`cargo fmt`, `cargo clippy --workspace --all-targets` and `cargo test
+--workspace` must pass (the CI runs them). Releases are described in
+[`RELEASING.md`](RELEASING.md), upcoming countries in
+[`ROADMAP.md`](ROADMAP.md).
 
-One process serving one index per country, answering like the BAN API
-(`api-adresse.data.gouv.fr`): `GET /search` (`q`, `limit`, `autocomplete`,
-`lat`, `lon`, `type`, `postcode`, `citycode`) and `GET /reverse`, GeoJSON
-`FeatureCollection` with `attribution` and `licence` per country, plus a
-`country` parameter (`fr`, `lu`, `be`).
+## Licence
 
-```bash
-export GEOCODER_COUNTRIES=fr,lu,be GEOCODER_DATA_DIR=data
-cargo run --release -p geocoder-api -- update        # downloads, builds what changed
-cargo run --release -p geocoder-api -- serve --port 8080
-curl 'localhost:8080/search?q=wetstraat+16+brussel&country=be'
-```
+MIT, see [`LICENSE`](LICENSE). geocoder-core ports addok, addok-fr and
+addok-france (MIT, Etalab / DINUM).
 
-| Variable | Default | |
-|---|---|---|
-| `GEOCODER_COUNTRIES` | `fr` | Countries served, `<code>.bin` in the data dir |
-| `GEOCODER_DEFAULT_COUNTRY` | the first | Without `country` |
-| `GEOCODER_DATA_DIR` | `data` (`/data` in the image) | Indexes, sidecars, downloads |
-| `GEOCODER_SOURCE_URLS_<CC>` | built in | Comma separated URLs or paths |
-| `GEOCODER_RELOAD_INTERVAL_SECONDS` | 60 | Index files checked for a new build |
-| `HOST` / `PORT` | `0.0.0.0` / 8080 (3000 in the image) | |
-| `SHUTDOWN_DELAY_SECONDS` | 5 | Readiness fails this long after SIGTERM |
-| `SENTRY_DSN`, `GEOCODER_ENV`, `RUST_LOG` | | |
-
-Other routes: `/countries` (loaded, documents, sources and build date),
-`/health/live`, `/health/ready` (an index loaded once one is built, not
-shutting down), `/openapi.json`, `/scalar`.
-
-`update` skips a country whose sources did not change (`Last-Modified` /
-`ETag`, kept in `<code>.bin.source.json`), and rebuilds atomically: the
-server picks the new file up without a restart.
-
-The Helm chart (`chart/`) follows the siren one: a Deployment reading the
-indexes from a volume, an `update` CronJob writing them, optional
-ListenerSet / HTTPRoute / auth (kgateway or APISIX) and Ingress. After the
-first install, build the indexes once:
-
-```bash
-kubectl create job --from=cronjob/<fullname>-update <fullname>-init
-```
+The data keep their producers' licences: the BAN (Etalab 2.0),
+BD-Adresses (CC0) and BeST Address (FPS BOSA, CC BY 4.0, attribution
+required). The API returns the attribution of each country with every
+response.

@@ -1,6 +1,6 @@
 //! Address geocoding, ported from addok.
 //!
-//! - [`profile`]: country specific text processing (default and `fr`).
+//! - [`profile`]: country specific text processing (`default`, `fr`, `lu`, `be`).
 //! - [`readers`]: data sources converted to addok's document format.
 //! - [`IndexBuilder`] / [`Index`]: the on-disk index.
 //! - [`Geocoder`]: search and reverse geocoding.
