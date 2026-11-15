@@ -4,6 +4,7 @@
 //! - [`readers`]: data sources converted to addok's document format.
 //! - [`IndexBuilder`] / [`Index`]: the on-disk index.
 //! - [`Geocoder`]: search and reverse geocoding.
+//! - `signed` (feature `signed`): signed manifests of prebuilt indexes.
 
 pub mod doc;
 mod error;
@@ -12,6 +13,8 @@ pub mod profile;
 pub mod readers;
 pub mod search;
 pub mod settings;
+#[cfg(feature = "signed")]
+pub mod signed;
 pub mod text;
 mod types;
 

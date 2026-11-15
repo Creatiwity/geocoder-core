@@ -3,8 +3,14 @@
 //!
 //! - `geocoder-api serve`: serves the indexes found in `GEOCODER_DATA_DIR`
 //!   (`<country>.bin`), reloading each when its file changes.
-//! - `geocoder-api update [--country xx] [--force]`: downloads the sources
-//!   and rebuilds the indexes that changed.
+//! - `geocoder-api update [--country xx] [--force]`: brings the indexes up
+//!   to date: downloads the prebuilt ones (`GEOCODER_INDEX_BASE_URL`, signed
+//!   manifests), or downloads the sources and rebuilds what changed.
+//! - `geocoder-api publish --out <dir>`: builds the indexes whose sources
+//!   changed since the published ones and signs their manifests
+//!   (`GEOCODER_SIGNING_KEY`), for the CI to upload.
+//! - `geocoder-api keygen`: a new signing key (private on stdout, public on
+//!   stderr).
 
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
@@ -25,6 +31,7 @@ use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, prelude::*};
 
 use config::Config;
+use geocoder_core::signed::SigningKey;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -57,15 +64,33 @@ enum Command {
         #[arg(long, env = "SHUTDOWN_DELAY_SECONDS", default_value_t = 5)]
         shutdown_delay_seconds: u64,
     },
-    /// Download the sources and rebuild the indexes that changed.
+    /// Bring the indexes up to date: the prebuilt ones when
+    /// GEOCODER_INDEX_BASE_URL is set, rebuilt from their sources otherwise.
     Update {
         /// Only this country (repeatable); default: every configured one.
         #[arg(long = "country")]
         only: Vec<String>,
-        /// Rebuild even when the sources did not change.
+        /// Download or rebuild even when nothing changed.
         #[arg(long)]
         force: bool,
     },
+    /// Build the indexes whose sources changed since the published ones
+    /// (GEOCODER_INDEX_BASE_URL), with their signed manifests, into `out`.
+    Publish {
+        #[arg(long)]
+        out: PathBuf,
+        /// Only this country (repeatable); default: every configured one.
+        #[arg(long = "country")]
+        only: Vec<String>,
+        /// Build even when the published index is up to date.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Generate a signing key: the private key (GEOCODER_SIGNING_KEY) on
+    /// stdout, the public one (GEOCODER_INDEX_PUBLIC_KEYS) on stderr.
+    Keygen,
+    /// Print the public key of GEOCODER_SIGNING_KEY.
+    PublicKey,
 }
 
 fn main() {
@@ -92,6 +117,21 @@ fn main() {
         .init();
 
     let cli = Cli::parse();
+    match cli.command {
+        Command::Keygen => std::process::exit(keygen()),
+        Command::PublicKey => std::process::exit(match signing_key() {
+            Some(key) => {
+                println!("{}", key.public_key());
+                0
+            }
+            None => 2,
+        }),
+        _ => {}
+    }
+    let prebuilt = config::Prebuilt::from_env().unwrap_or_else(|e| {
+        error!("Invalid configuration: {e}");
+        std::process::exit(2)
+    });
     let config = Config::from_env(
         &cli.countries,
         cli.default_country.as_deref(),
@@ -131,14 +171,57 @@ fn main() {
                 .await;
                 0
             }
-            Command::Update { only, force } => update(&config, &only, force).await,
+            Command::Update { only, force } => {
+                for_each(&config, &only, |country| {
+                    sync::sync(country, prebuilt.as_ref(), force)
+                })
+                .await
+            }
+            Command::Publish { out, only, force } => {
+                let Some(key) = signing_key() else {
+                    return 2;
+                };
+                info!("Signing with {}", key.public_key());
+                for_each(&config, &only, |country| {
+                    sync::publish(country, &out, &key, prebuilt.as_ref(), force)
+                })
+                .await
+            }
+            Command::Keygen | Command::PublicKey => unreachable!(),
         }
     });
     std::process::exit(code)
 }
 
+fn signing_key() -> Option<SigningKey> {
+    let key = std::env::var("GEOCODER_SIGNING_KEY")
+        .ok()
+        .and_then(|k| k.parse::<SigningKey>().ok());
+    if key.is_none() {
+        error!("GEOCODER_SIGNING_KEY is missing or invalid (64 hex digits)");
+    }
+    key
+}
+
+/// Prints a new key pair; the private key never goes to a log.
+fn keygen() -> i32 {
+    let mut seed = [0u8; 32];
+    if let Err(e) = getrandom::fill(&mut seed) {
+        eprintln!("No randomness available: {e}");
+        return 1;
+    }
+    let key = SigningKey::from_seed(seed);
+    println!("{}", key.to_hex());
+    eprintln!("public key: {}", key.public_key());
+    0
+}
+
 /// Each country on its own: one failing source does not block the others.
-async fn update(config: &Config, only: &[String], force: bool) -> i32 {
+async fn for_each<'a, F, Fut>(config: &'a Config, only: &[String], run: F) -> i32
+where
+    F: Fn(&'a config::Country) -> Fut,
+    Fut: std::future::Future<Output = Result<sync::SyncOutcome, sync::Error>>,
+{
     for code in only {
         if config.country(&code.to_lowercase()).is_none() {
             error!("Country {code} is not configured");
@@ -150,7 +233,7 @@ async fn update(config: &Config, only: &[String], force: bool) -> i32 {
         if !only.is_empty() && !only.iter().any(|c| c.eq_ignore_ascii_case(&country.code)) {
             continue;
         }
-        match sync::sync(country, force).await {
+        match run(country).await {
             Ok(outcome) => info!("{}", serde_json::to_string(&outcome).unwrap_or_default()),
             Err(e) => {
                 error!("[{}] update failed: {e}", country.code);

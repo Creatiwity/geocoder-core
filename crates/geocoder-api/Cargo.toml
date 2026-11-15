@@ -13,12 +13,13 @@ name = "geocoder-api"
 path = "src/main.rs"
 
 [dependencies]
-geocoder-core = { path = "../geocoder-core", default-features = false }
+geocoder-core = { path = "../geocoder-core", default-features = false, features = ["signed"] }
 
 axum = { version = "0.8", features = ["json", "query"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.6", features = ["derive", "env"] }
 futures = "0.3"
+getrandom = "0.4"
 reqwest = { version = "0.13", default-features = false, features = [
   "stream",
   "rustls",
