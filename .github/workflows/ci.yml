@@ -4,16 +4,35 @@ on:
   push:
   pull_request:
 
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - uses: actions/checkout@v7
+      # rust-toolchain.toml drives the installed version.
+      - run: rustup show
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy -p geocoder-core --no-default-features --lib -- -D warnings
       - run: cargo test --workspace
+
+  # What `cargo publish` would upload, built from the packaged sources
+  # alone: a file outside the crate fails here, not on release day.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo publish -p geocoder-core --dry-run --locked

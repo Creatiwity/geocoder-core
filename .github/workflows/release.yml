@@ -1,0 +1,93 @@
+name: Release
+
+# Runs on a version tag (`vX.Y.Z`, see RELEASING.md): checks that the tag,
+# the crates and the changelog agree, creates the GitHub release, then
+# publishes geocoder-core to crates.io. The Docker image of geocoder-api is
+# pushed by the Image workflow on the same tag. The publishing job runs in
+# the `release` environment: its required reviewers are the last approval
+# before anything is public.
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Versions and changelog
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: version
+        name: Check versions
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          crates=$(cargo metadata --format-version 1 --no-deps --locked \
+            | jq -r '[.packages[].version] | unique | join(" ")')
+          chart=$(awk '/^appVersion:/ { gsub(/"/, "", $2); print $2 }' chart/Chart.yaml)
+          echo "tag $version, crates $crates, chart appVersion $chart"
+          if [ "$crates" != "$version" ] || [ "$chart" != "v$version" ]; then
+            echo "::error::the tag, Cargo.toml ([workspace.package] version) and chart/Chart.yaml (appVersion) must carry the same version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check the changelog
+        run: |
+          grep -q "^## \[${{ steps.version.outputs.version }}\]" CHANGELOG.md \
+            || { echo "::error::CHANGELOG.md has no section for ${{ steps.version.outputs.version }} (git cliff, see RELEASING.md)"; exit 1; }
+
+  github:
+    name: GitHub release
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # The notes are this version's section of CHANGELOG.md.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ needs.check.outputs.version }}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          gh release create "$GITHUB_REF_NAME" --title "geocoder-core $version" --notes-file notes.md --verify-tag
+
+  crates-io:
+    name: Publish to crates.io
+    needs: [check, github]
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v7
+
+      - run: rustup show
+
+      # Can be re-run: a version already on crates.io is skipped.
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            -A "geocoder-core-release (https://github.com/Creatiwity/geocoder-core)" \
+            "https://crates.io/api/v1/crates/geocoder-core/$VERSION")
+          if [ "$status" = 200 ]; then
+            echo "geocoder-core $VERSION is already on crates.io"
+            exit 0
+          fi
+          cargo publish -p geocoder-core --locked
