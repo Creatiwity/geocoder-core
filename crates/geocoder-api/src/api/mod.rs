@@ -120,11 +120,18 @@ async fn live() -> Response {
 }
 
 /// Ready once one index is loaded: a country still being built answers 503
-/// on its own, the others are served.
+/// on its own, the others are served. Before any index is built (first
+/// install), ready all the same: searches answer 503, but a deployment does
+/// not wait for a build that only runs once it is rolled out.
 async fn ready(State(context): State<Arc<Context>>) -> Response {
     let shutting_down = context.shutting_down.load(Ordering::Relaxed);
     let loaded = context.indexes.loaded();
-    let ok = !shutting_down && loaded > 0;
+    let none_built = !context
+        .config
+        .countries
+        .iter()
+        .any(|c| c.index_path.exists());
+    let ok = !shutting_down && (loaded > 0 || none_built);
     no_store(
         if ok {
             StatusCode::OK
@@ -286,6 +293,24 @@ mod tests {
         let (status, body) = get(&context, "/reverse?lat=50.0949&lon=6.0629").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["features"][0]["properties"]["housenumber"], "20");
+    }
+
+    #[tokio::test]
+    async fn ready_before_the_first_build_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::new("lu", None, dir.path(), |_| None).unwrap();
+        let context = Arc::new(Context {
+            indexes: Indexes::open(&config),
+            config,
+            shutting_down: Arc::default(),
+        });
+        assert_eq!(get(&context, "/health/ready").await.0, StatusCode::OK);
+        // A file that does not load: not ready.
+        std::fs::write(dir.path().join("lu.bin"), b"broken").unwrap();
+        assert_eq!(
+            get(&context, "/health/ready").await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[tokio::test]

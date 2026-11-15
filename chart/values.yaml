@@ -1,0 +1,264 @@
+replicaCount: 1
+
+image:
+  repository: creatiwity/geocoder-api
+  pullPolicy: IfNotPresent
+  # Defaults to the chart appVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Comma separated: fr (BAN), lu (BD-Adresses), be (BeST Address). One index
+# each, searched with ?country=<code>.
+countries: "fr"
+# Searched without a `country` parameter. Empty: the first of `countries`.
+defaultCountry: ""
+# Overrides the built-in source of a country: a URL or a list of URLs (zip,
+# gz or plain), e.g. a mirror.
+sourceUrls: {}
+#  be:
+#    - https://mirror.example/openaddress-bevlg.zip
+#    - https://mirror.example/openaddress-bewal.zip
+#    - https://mirror.example/openaddress-bebru.zip
+
+# How often the API checks the index files for a new build.
+reloadIntervalSeconds: 60
+
+rustLog: "info"
+environment: "production"
+# Sensitive: stored in the chart Secret, never in a pod spec.
+sentryDsn:
+
+secrets:
+  # Use an existing Secret instead (sentryDsn is then ignored, its key
+  # optional).
+  existingSecret: ""
+  keys:
+    sentryDsn: SENTRY_DSN
+
+# Added to every container. `env` wins over `envFrom`.
+envFrom: []
+extraEnv: []
+
+# `update` CronJob: downloads the sources and rebuilds the indexes that
+# changed, nothing otherwise. Sources refresh daily (BAN) or weekly (LU, BE).
+# Right after install, run it once by hand for the first build:
+#   kubectl create job --from=cronjob/<fullname>-update <fullname>-init
+update:
+  enabled: true
+  schedule: "0 3 * * *"
+  # true: a template for manual runs only.
+  suspend: false
+  # IANA name, e.g. Europe/Paris. Cluster time zone (usually UTC) when empty.
+  timeZone: ""
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  backoffLimit: 1
+  activeDeadlineSeconds: 7200
+  # Building an index is CPU bound and memory hungry: France ~6 min and up to
+  # ~5 GiB, Belgium ~1 min and ~4.5 GiB, Luxembourg seconds. Countries are
+  # built one after the other.
+  resources:
+    requests:
+      cpu: 1000m
+      memory: 5Gi
+    # limits:
+    #   memory: 6Gi
+
+# Volume of the indexes, shared by the API (read only) and the update jobs.
+persistence:
+  # Use an existing claim instead of creating one.
+  existingClaim: ""
+  storageClass: ""
+  mountPath: /data
+  # ReadWriteOnce (block storage, e.g. OVH csi-cinder) is attached to one node
+  # at a time, but every pod on that node can mount it: with sameNode, the
+  # update jobs are scheduled next to an API pod and the API pods stay
+  # together. For API replicas spread over nodes, use a ReadWriteMany class
+  # (NFS) and set sameNode to false.
+  accessModes:
+    - ReadWriteOnce
+  sameNode: true
+  # Per country, the index plus its rebuild plus the download: France ~7 GB,
+  # Belgium ~0.6 GB, Luxembourg ~0.1 GB.
+  size: 10Gi
+
+# On SIGTERM the pod keeps serving this long with /health/ready failing, so it
+# leaves the Service endpoints before the listener closes.
+shutdownDelaySeconds: 5
+terminationGracePeriodSeconds: 30
+
+probes:
+  # Loading the French index takes a few seconds.
+  startup:
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 60
+  liveness:
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  readiness:
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 2
+    successThreshold: 1
+
+serviceAccount:
+  create: true
+  # The API never calls the Kubernetes API: no token is mounted.
+  automount: false
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+# Added to every pod (API, jobs). Never used as a selector.
+podLabels: {}
+
+priorityClassName: ""
+
+# Distroless image: its `nonroot` user (65532) owns nothing but what fsGroup
+# grants, here the data volume.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  # Skips the recursive chown of the volume when it already matches.
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: geocoder-api.local
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+  tls: []
+
+# Gateway API routing, as an alternative to the Ingress above, for any
+# controller (kgateway, APISIX, ...). Never enable it for a host the Ingress
+# still serves while either carries a certificate annotation: ingress-shim and
+# gateway-shim would fight over the Certificate and renewal silently stops.
+
+# Listeners of the hosts, attached to an existing Gateway. Leave it disabled
+# when the Gateway already has them, e.g. a shared one.
+listenerSet:
+  enabled: false
+  # E.g. cert-manager.io/cluster-issuer.
+  annotations: {}
+  # The Gateway this ListenerSet attaches to. Required when enabled.
+  parentRef:
+    name: ""
+    # Defaults to the release namespace when empty.
+    namespace: ""
+  # One HTTPS (443) and one HTTP (80) listener per host. `suffix` names them
+  # (https-<suffix>), the index by default.
+  hosts:
+    - host: geocoder-api.local
+  # Pins the TLS secret per host. Defaults to "<fullname>-tls" when unset.
+  tls: []
+
+# A single HTTPRoute to the Service. Authentication is set by `auth` below;
+# other filters (rewrites, an ExtensionRef to a resource managed elsewhere)
+# are set here.
+httpRoute:
+  enabled: false
+  annotations: {}
+  # Gateway API ParentReferences. Empty: the chart's ListenerSet (requires
+  # listenerSet.enabled).
+  parentRefs: []
+  # Empty: the hosts of listenerSet.hosts.
+  hostnames: []
+  # Default rule. Empty matches: PathPrefix /.
+  matches: []
+  filters: []
+  # Further HTTPRouteRules. A rule without backendRefs goes to the Service.
+  extraRules: []
+
+# Authentication on part of the HTTPRoute, for the controller in use. The
+# chart creates the controller's resource (<fullname>-auth) and adds a rule
+# with `matches`, carrying the default rule's filters plus an ExtensionRef to
+# it. Paths outside `matches` (/countries, /scalar, /openapi.json, /health/*)
+# stay open.
+auth:
+  # "" (none), kgateway or apisix. Requires httpRoute.enabled.
+  provider: ""
+  matches:
+    - path:
+        type: PathPrefix
+        value: /search
+    - path:
+        type: PathPrefix
+        value: /reverse
+  kgateway:
+    # The GatewayExtension of the ext auth service.
+    extensionRef:
+      name: ""
+      namespace: ""
+  apisix:
+    plugins: []
+
+# Requests only by default: a CPU limit throttles the Tokio workers. The
+# indexes are memory mapped (page cache) and their FSTs copied in memory,
+# twice during a reload: France ~1.5 GiB, Belgium and Luxembourg little.
+resources:
+  requests:
+    cpu: 100m
+    memory: 2Gi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+
+# Rolling update: a new pod is ready before an old one goes away.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 0
+
+revisionHistoryLimit: 5
+
+podDisruptionBudget:
+  enabled: true
+  # Set at most one; maxUnavailable: 1 when both are empty.
+  maxUnavailable:
+  minAvailable:
+  unhealthyPodEvictionPolicy: AlwaysAllow
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Spread the API pods. Moot with persistence.sameNode, which keeps them
+# together.
+topologySpreadConstraints: []
+
+# Scheduling of the update jobs; each empty field falls back to its top-level
+# counterpart. With persistence.sameNode, they must still be able to land on
+# the API node.
+jobs:
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}

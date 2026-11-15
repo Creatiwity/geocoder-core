@@ -1,0 +1,56 @@
+{{/* `update`: downloads the sources of every country and rebuilds the
+     indexes that changed (a no-op otherwise). The first build, right after
+     install:
+       kubectl create job --from=cronjob/<fullname>-update <fullname>-init */}}
+{{- if .Values.update.enabled -}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "app.fullname" . }}-update
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.update.schedule | quote }}
+  suspend: {{ .Values.update.suspend }}
+  {{- with .Values.update.timeZone }}
+  timeZone: {{ . | quote }}
+  {{- end }}
+  # Two builds of the same index would race on its file.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: {{ .Values.update.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ .Values.update.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.update.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.update.backoffLimit }}
+      {{- with .Values.update.activeDeadlineSeconds }}
+      activeDeadlineSeconds: {{ . }}
+      {{- end }}
+      template:
+        metadata:
+          labels:
+            {{- include "app.jobPodLabels" (dict "root" . "component" "update") | nindent 12 }}
+        spec:
+          serviceAccountName: {{ include "app.serviceAccountName" . }}
+          {{- include "app.podCommon" (dict "root" . "jobs" true) | nindent 10 }}
+          restartPolicy: Never
+          containers:
+            - name: update
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              args: ["update"]
+              {{- include "app.envFrom" . | nindent 14 }}
+              env:
+                {{- include "app.env" . | nindent 16 }}
+              volumeMounts:
+                - name: data
+                  mountPath: {{ .Values.persistence.mountPath }}
+              {{- with .Values.update.resources }}
+              resources:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+          volumes:
+            {{- include "app.dataVolume" . | nindent 12 }}
+{{- end }}
