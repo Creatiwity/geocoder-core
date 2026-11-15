@@ -1,0 +1,105 @@
+name: Build indexes
+
+# Builds the index of each country from its open data source, the way the
+# `update` command of geocoder-api does, and reports what it took (peak
+# memory, time, size), then checks the index answers a search.
+# Manual for now: the publication to object storage comes next. Also runs
+# when this file changes, since workflow_dispatch only triggers workflows
+# already on the default branch.
+
+on:
+  push:
+    paths:
+      - .github/workflows/build-index.yml
+  workflow_dispatch:
+    inputs:
+      countries:
+        description: "Countries to build, as a JSON list"
+        default: '["fr", "lu", "be"]'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  binary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p geocoder-api
+      - uses: actions/upload-artifact@v4
+        with:
+          name: geocoder-api
+          path: target/release/geocoder-api
+          retention-days: 1
+
+  build:
+    needs: binary
+    runs-on: ubuntu-latest
+    # One job per country: its own runner, so its own peak memory.
+    strategy:
+      fail-fast: false
+      matrix:
+        country: ${{ fromJSON(inputs.countries || '["fr", "lu", "be"]') }}
+    env:
+      GEOCODER_COUNTRIES: ${{ matrix.country }}
+      GEOCODER_DATA_DIR: ${{ github.workspace }}/data
+      RUST_LOG: info
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: geocoder-api
+      - run: chmod +x geocoder-api
+
+      - name: Runner
+        run: |
+          nproc
+          free -h
+          df -h "$GITHUB_WORKSPACE"
+
+      - name: Build the index
+        run: |
+          /usr/bin/time -v -o time.txt ./geocoder-api update --force
+          cat time.txt
+
+      - name: Search
+        env:
+          PORT: "3000"
+          HOST: "127.0.0.1"
+        run: |
+          ./geocoder-api serve &
+          for _ in $(seq 60); do
+            curl -sf localhost:3000/health/ready > /dev/null && break
+            sleep 1
+          done
+          case "${{ matrix.country }}" in
+            fr) q="8 bd du port nanterre" ;;
+            lu) q="avenue de la gare luxembourg" ;;
+            be) q="rue de la loi bruxelles" ;;
+          esac
+          curl -sf -G localhost:3000/search --data-urlencode "q=$q" -d limit=1 | tee search.json | jq .
+          test "$(jq '.features | length' search.json)" -gt 0
+          ps -o rss= -p "$(pgrep -f 'geocoder-api serve')" | awk '{ printf "%.0f\n", $1 / 1024 }' > serve-rss.txt
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### ${{ matrix.country }}"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            if [ -f time.txt ]; then
+              awk -F': ' '/Maximum resident set size/ { printf "| Build peak memory | %.2f GiB |\n", $2 / 1048576 }
+                          /Elapsed \(wall clock\)/ { print "| Build time | " $2 " |" }' time.txt
+            fi
+            if [ -f "data/${{ matrix.country }}.bin" ]; then
+              echo "| Index size | $(du -h "data/${{ matrix.country }}.bin" | cut -f1) |"
+              echo "| Documents | $(jq .documents "data/${{ matrix.country }}.bin.source.json") |"
+            fi
+            if [ -f serve-rss.txt ]; then
+              echo "| API resident memory after one search | $(cat serve-rss.txt) MiB |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
