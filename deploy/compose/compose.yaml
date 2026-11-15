@@ -1,0 +1,92 @@
+# geocoder-api on a single host (VPS): the API behind Caddy (automatic
+# HTTPS), and an `update` service run on a schedule by the host's cron (the
+# image is distroless: no shell, no cron inside).
+#
+#   cp .env.example .env && $EDITOR .env
+#   docker compose up -d
+#   docker compose run --rm update          # first build, then from cron
+#
+# Memory: serving needs little (~100-300 MB, plus the page cache of the
+# indexes, reclaimable); building the French index peaks at ~5 GB.
+
+name: geocoder
+
+x-app: &app
+  image: creatiwity/geocoder-api:${GEOCODER_VERSION:-v0.2.0}
+  user: "65532:65532"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  environment: &env
+    GEOCODER_COUNTRIES: ${GEOCODER_COUNTRIES:-fr,lu,be}
+    GEOCODER_DEFAULT_COUNTRY: ${GEOCODER_DEFAULT_COUNTRY:-}
+    GEOCODER_DATA_DIR: /data
+    GEOCODER_ENV: ${GEOCODER_ENV:-production}
+    RUST_LOG: ${RUST_LOG:-info}
+    SENTRY_DSN: ${SENTRY_DSN:-}
+
+services:
+  # The image runs as 65532 (distroless nonroot): hand it the volume once.
+  data-permissions:
+    image: busybox:1.37
+    command: ["chown", "-R", "65532:65532", "/data"]
+    volumes:
+      - data:/data
+    restart: "no"
+
+  api:
+    <<: *app
+    command: ["serve"]
+    environment:
+      <<: *env
+      GEOCODER_RELOAD_INTERVAL_SECONDS: "60"
+      SHUTDOWN_DELAY_SECONDS: "2"
+    volumes:
+      # Read only: `update` rebuilds the indexes in place (atomic rename),
+      # the API reloads them without a restart.
+      - data:/data:ro
+    depends_on:
+      data-permissions:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    stop_grace_period: 15s
+    mem_limit: ${API_MEM_LIMIT:-1g}
+    expose: ["3000"]
+    logging: &logging
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  # Not started by `up`: `docker compose run --rm update`, by hand or cron.
+  # Rebuilds only the countries whose sources changed.
+  update:
+    <<: *app
+    command: ["update"]
+    volumes:
+      - data:/data
+    depends_on:
+      data-permissions:
+        condition: service_completed_successfully
+    profiles: [update]
+    mem_limit: ${UPDATE_MEM_LIMIT:-6g}
+    logging: *logging
+
+  caddy:
+    image: caddy:2.10-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      GEOCODER_DOMAIN: ${GEOCODER_DOMAIN:?set GEOCODER_DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [api]
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  data:
+  caddy-data:
+  caddy-config:
