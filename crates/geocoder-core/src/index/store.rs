@@ -13,6 +13,11 @@ use crate::types::{DocId, TokenId};
 
 /// A read-only index, memory mapped. Only the FSTs are copied in memory;
 /// postings, bitmaps and documents are read in place on demand.
+///
+/// Reading never trusts the file: every offset is bounds checked and the
+/// FSTs' checksums verified, so a damaged or tampered index fails to open
+/// or yields empty lookups, never a panic. Whether the content is genuine
+/// is a matter of signatures (see `signed`), not of this type.
 pub struct Index {
     mmap: Mmap,
     ranges: Vec<(usize, usize)>,
@@ -48,12 +53,13 @@ impl Index {
             let Ok(kind) = SectionKind::try_from(header[0]) else {
                 continue;
             };
-            let offset = u64::from_le_bytes(header[1..9].try_into().unwrap()) as usize;
-            let length = u64::from_le_bytes(header[9..17].try_into().unwrap()) as usize;
-            if offset + length > data.len() {
-                return Err(GeocoderError::InvalidIndex("truncated"));
-            }
-            ranges[kind as usize] = (offset, offset + length);
+            let offset = u64::from_le_bytes(header[1..9].try_into().unwrap());
+            let length = u64::from_le_bytes(header[9..17].try_into().unwrap());
+            let end = offset
+                .checked_add(length)
+                .filter(|&end| end <= data.len() as u64)
+                .ok_or(GeocoderError::InvalidIndex("truncated"))?;
+            ranges[kind as usize] = (offset as usize, end as usize);
             found[kind as usize] = true;
         }
         if found.iter().any(|f| !f) {
@@ -64,10 +70,17 @@ impl Index {
             &data[start..end]
         };
         let meta: Meta = serde_json::from_slice(section(SectionKind::Meta))?;
-        let token_fst = Map::new(section(SectionKind::TokenFst).to_vec())?;
-        let ngram_fst = Map::new(section(SectionKind::NgramFst).to_vec())?;
-        let geohash_fst = Map::new(section(SectionKind::GeohashFst).to_vec())?;
-        let filter_fst = Map::new(section(SectionKind::FilterFst).to_vec())?;
+        // fst walks its nodes without bounds checks of its own (it panics on
+        // a malformed node): its checksum is verified first.
+        let fst = |kind: SectionKind| -> Result<Map<Vec<u8>>, GeocoderError> {
+            let map = Map::new(section(kind).to_vec())?;
+            map.as_fst().verify()?;
+            Ok(map)
+        };
+        let token_fst = fst(SectionKind::TokenFst)?;
+        let ngram_fst = fst(SectionKind::NgramFst)?;
+        let geohash_fst = fst(SectionKind::GeohashFst)?;
+        let filter_fst = fst(SectionKind::FilterFst)?;
         Ok(Self {
             mmap,
             ranges,
@@ -84,12 +97,23 @@ impl Index {
         &self.mmap[start..end]
     }
 
+    /// Entry `i` of an offset table: `(start, end)`, with `start <= end`.
     fn offset(&self, kind: SectionKind, i: usize) -> Option<(usize, usize)> {
         let table = self.section(kind);
-        let at = i * 8;
-        let start = u64::from_le_bytes(table.get(at..at + 8)?.try_into().ok()?) as usize;
-        let end = u64::from_le_bytes(table.get(at + 8..at + 16)?.try_into().ok()?) as usize;
-        Some((start, end))
+        let at = i.checked_mul(8)?;
+        let start = u64::from_le_bytes(table.get(at..at.checked_add(8)?)?.try_into().ok()?);
+        let end = u64::from_le_bytes(table.get(at + 8..at.checked_add(16)?)?.try_into().ok()?);
+        (start <= end).then_some((usize::try_from(start).ok()?, usize::try_from(end).ok()?))
+    }
+
+    /// `section[start * width..end * width]`, empty when out of bounds.
+    fn slice(&self, kind: SectionKind, range: Option<(usize, usize)>, width: usize) -> &[u8] {
+        range
+            .and_then(|(start, end)| {
+                let (start, end) = (start.checked_mul(width)?, end.checked_mul(width)?);
+                self.section(kind).get(start..end)
+            })
+            .unwrap_or_default()
     }
 
     pub fn token_id(&self, token: &str) -> Option<TokenId> {
@@ -109,21 +133,16 @@ impl Index {
 
     /// Postings sorted by document.
     pub fn postings(&self, token: TokenId) -> Postings<'_> {
-        let (start, end) = self
-            .offset(SectionKind::PostingOffsets, token as usize)
-            .unwrap_or((0, 0));
+        let range = self.offset(SectionKind::PostingOffsets, token as usize);
         Postings {
-            bytes: &self.section(SectionKind::PostingsByDoc)[start * 8..end * 8],
+            bytes: self.slice(SectionKind::PostingsByDoc, range, 8),
         }
     }
 
     /// The first `limit` documents of a token, like `ZREVRANGE key 0 limit-1`.
     pub fn top(&self, token: TokenId, limit: usize) -> impl Iterator<Item = DocId> + '_ {
-        let (start, end) = self
-            .offset(SectionKind::PostingOffsets, token as usize)
-            .unwrap_or((0, 0));
-        let bytes = &self.section(SectionKind::PostingsByScore)[start * 4..end * 4];
-        bytes
+        let range = self.offset(SectionKind::PostingOffsets, token as usize);
+        self.slice(SectionKind::PostingsByScore, range, 4)
             .as_chunks::<4>()
             .0
             .iter()
@@ -133,11 +152,8 @@ impl Index {
 
     /// Tokens seen in at least one document along with `token`.
     pub fn pairs(&self, token: TokenId) -> RoaringBitmap {
-        self.offset(SectionKind::PairOffsets, token as usize)
-            .and_then(|(s, e)| {
-                RoaringBitmap::deserialize_from(&self.section(SectionKind::PairBlobs)[s..e]).ok()
-            })
-            .unwrap_or_default()
+        let range = self.offset(SectionKind::PairOffsets, token as usize);
+        bitmap(self.slice(SectionKind::PairBlobs, range, 1))
     }
 
     /// Tokens starting with `prefix` (and longer than it).
@@ -177,20 +193,33 @@ impl Index {
         offsets: SectionKind,
         blobs: SectionKind,
     ) -> RoaringBitmap {
-        fst.get(key)
-            .and_then(|i| self.offset(offsets, i as usize))
-            .and_then(|(s, e)| RoaringBitmap::deserialize_from(&self.section(blobs)[s..e]).ok())
-            .unwrap_or_default()
+        let range = fst.get(key).and_then(|i| self.offset(offsets, i as usize));
+        bitmap(self.slice(blobs, range, 1))
     }
 
     pub fn document(&self, doc: DocId) -> Option<Document> {
-        let (start, end) = self.offset(SectionKind::DocOffsets, doc as usize)?;
+        let range = self.offset(SectionKind::DocOffsets, doc as usize)?;
+        let blob = self.slice(SectionKind::DocBlobs, Some(range), 1);
+        // Bounded: a zlib bomb would otherwise fill the memory.
         let mut json = Vec::new();
-        ZlibDecoder::new(&self.section(SectionKind::DocBlobs)[start..end])
+        ZlibDecoder::new(blob)
+            .take(MAX_DOCUMENT_BYTES + 1)
             .read_to_end(&mut json)
             .ok()?;
+        if json.len() as u64 > MAX_DOCUMENT_BYTES {
+            return None;
+        }
         serde_json::from_slice(&json).ok()
     }
+}
+
+/// Largest decompressed document. The biggest BAN street (thousands of
+/// housenumbers) is a few hundred KB.
+const MAX_DOCUMENT_BYTES: u64 = 16 << 20;
+
+/// A serialized bitmap, validated (empty when invalid).
+fn bitmap(bytes: &[u8]) -> RoaringBitmap {
+    RoaringBitmap::deserialize_from(bytes).unwrap_or_default()
 }
 
 /// `(doc, boost)` entries of one token, sorted by doc.
