@@ -1,25 +1,48 @@
-name: Build indexes
+name: Indexes
 
-# Builds the index of each country from its open data source, the way the
-# `update` command of geocoder-api does, and reports what it took (peak
-# memory, time, size), then checks the index answers a search.
-# Manual for now: the publication to object storage comes next. Also runs
-# when this file changes, since workflow_dispatch only triggers workflows
-# already on the default branch.
+# Builds the index of each country whose sources changed since the
+# published one, checks it end to end (signed manifest, download, search),
+# then publishes it to object storage, where `geocoder-api update` (with
+# GEOCODER_INDEX_BASE_URL) and siren fetch it:
+#
+#   <bucket>/v<format>/<cc>.json               signed manifest, read first
+#   <bucket>/v<format>/<cc>-<sha256 prefix>.bin the index it names
+#
+# The index goes up before its manifest, under a new name: a reader never
+# sees a manifest without its index. The previous index is kept for readers
+# still downloading it; older ones are deleted.
+#
+# Publishes from main only (schedule, or by hand). Elsewhere, e.g. on a
+# change of this file, it builds and checks with a throwaway key.
+#
+# Repository secrets: INDEX_SIGNING_KEY (`geocoder-api keygen`),
+# S3_ENDPOINT, S3_REGION, S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY.
+# Repository variable: INDEX_BASE_URL, the public URL of the bucket.
 
 on:
+  schedule:
+    # Every day: the BAN is published daily, LU and BE weekly.
+    - cron: "17 4 * * *"
   push:
     paths:
       - .github/workflows/build-index.yml
   workflow_dispatch:
     inputs:
       countries:
-        description: "Countries to build, as a JSON list"
+        description: "Countries, as a JSON list"
         default: '["fr", "lu", "be"]'
         required: true
+      force:
+        description: "Rebuild even when the published index is up to date"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+
+concurrency:
+  group: indexes-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   binary:
@@ -35,46 +58,80 @@ jobs:
           path: target/release/geocoder-api
           retention-days: 1
 
-  build:
+  index:
     needs: binary
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     # One job per country: its own runner, so its own peak memory.
     strategy:
       fail-fast: false
       matrix:
         country: ${{ fromJSON(inputs.countries || '["fr", "lu", "be"]') }}
     env:
+      CC: ${{ matrix.country }}
       GEOCODER_COUNTRIES: ${{ matrix.country }}
-      GEOCODER_DATA_DIR: ${{ github.workspace }}/data
       RUST_LOG: info
+      PUBLISH: ${{ github.ref == 'refs/heads/main' && github.event_name != 'push' }}
     steps:
       - uses: actions/download-artifact@v8
         with:
           name: geocoder-api
       - run: chmod +x geocoder-api
 
-      - name: Runner
-        run: |
-          nproc
-          free -h
-          df -h "$GITHUB_WORKSPACE"
-
-      - name: Build the index
-        run: |
-          /usr/bin/time -v -o time.txt ./geocoder-api update --force
-          cat time.txt
-
-      - name: Search
+      - name: Signing key
         env:
+          INDEX_SIGNING_KEY: ${{ secrets.INDEX_SIGNING_KEY }}
+        run: |
+          if [ "$PUBLISH" = true ]; then
+            if [ -z "$INDEX_SIGNING_KEY" ]; then
+              echo "::error::INDEX_SIGNING_KEY is not set"
+              exit 1
+            fi
+            key="$INDEX_SIGNING_KEY"
+          else
+            key=$(./geocoder-api keygen 2>/dev/null)
+          fi
+          echo "::add-mask::$key"
+          echo "GEOCODER_SIGNING_KEY=$key" >> "$GITHUB_ENV"
+
+      - name: Build
+        env:
+          # Compared with the published index: nothing is built when its
+          # sources did not change. Not when testing: always build.
+          GEOCODER_INDEX_BASE_URL: ${{ env.PUBLISH == 'true' && vars.INDEX_BASE_URL || '' }}
+          FORCE: ${{ inputs.force && '--force' || '' }}
+        run: |
+          # shellcheck disable=SC2086
+          /usr/bin/time -v -o time.txt ./geocoder-api publish --out out $FORCE
+          cat time.txt
+          if [ -f "out/$CC.json" ]; then
+            echo "BUILT=true" >> "$GITHUB_ENV"
+          fi
+
+      # The way a reader gets it: signed manifest, download, checks, then a
+      # search on the result.
+      - name: Check
+        if: env.BUILT == 'true'
+        env:
+          GEOCODER_DATA_DIR: ${{ github.workspace }}/data
           PORT: "3000"
           HOST: "127.0.0.1"
         run: |
+          format=$(jq -r .manifest "out/$CC.json" | jq .format_version)
+          mkdir -p "srv/v$format"
+          ln out/* "srv/v$format/"
+          (cd srv && python3 -m http.server 8000 --bind 127.0.0.1 > /dev/null 2>&1 &)
+          sleep 1
+          GEOCODER_INDEX_BASE_URL=http://127.0.0.1:8000 \
+            GEOCODER_INDEX_PUBLIC_KEYS=$(./geocoder-api public-key) \
+            ./geocoder-api update
+
           ./geocoder-api serve &
           for _ in $(seq 60); do
             curl -sf localhost:3000/health/ready > /dev/null && break
             sleep 1
           done
-          case "${{ matrix.country }}" in
+          case "$CC" in
             fr) q="8 bd du port nanterre" ;;
             lu) q="avenue de la gare luxembourg" ;;
             be) q="rue de la loi bruxelles" ;;
@@ -83,23 +140,62 @@ jobs:
           test "$(jq '.features | length' search.json)" -gt 0
           ps -o rss= -p "$(pgrep -f 'geocoder-api serve')" | awk '{ printf "%.0f\n", $1 / 1024 }' > serve-rss.txt
 
+      - name: Publish
+        if: env.BUILT == 'true' && env.PUBLISH == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.S3_REGION }}
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          # The CRC checksums of recent AWS CLIs are not understood by every
+          # S3 compatible storage.
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          manifest=$(jq -r .manifest "out/$CC.json")
+          prefix="v$(jq .format_version <<<"$manifest")"
+          file=$(jq -r .file <<<"$manifest")
+          s3() { aws --endpoint-url "$S3_ENDPOINT" "$@"; }
+
+          # Public read through the object ACL (OVH has no bucket policies).
+          s3 s3 cp "out/$file" "s3://$S3_BUCKET/$prefix/$file" --acl public-read --no-progress
+          s3 s3 cp "out/$CC.json" "s3://$S3_BUCKET/$prefix/$CC.json" --acl public-read \
+            --content-type application/json --cache-control "no-cache"
+
+          # Keep the new index and the previous one.
+          s3 s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "$prefix/$CC-" \
+              --query 'sort_by(Contents, &LastModified)[].Key' --output text \
+            | tr '\t' '\n' | grep '\.bin$' | head -n -2 \
+            | while read -r old; do
+                echo "deleting $old"
+                s3 s3 rm "s3://$S3_BUCKET/$old"
+              done
+
+          # What readers will get, without credentials.
+          curl -sf "${{ vars.INDEX_BASE_URL }}/$prefix/$CC.json" > published.json
+          cmp -s published.json "out/$CC.json"
+          curl -sfI "${{ vars.INDEX_BASE_URL }}/$prefix/$file" > /dev/null
+
       - name: Summary
         if: always()
         run: |
           {
-            echo "### ${{ matrix.country }}"
+            echo "### $CC"
             echo
+            if [ "$BUILT" != true ]; then
+              echo "Published index up to date: nothing built."
+              exit 0
+            fi
             echo "| | |"
             echo "|---|---|"
-            if [ -f time.txt ]; then
-              awk -F': ' '/Maximum resident set size/ { printf "| Build peak memory | %.2f GiB |\n", $2 / 1048576 }
-                          /Elapsed \(wall clock\)/ { print "| Build time | " $2 " |" }' time.txt
-            fi
-            if [ -f "data/${{ matrix.country }}.bin" ]; then
-              echo "| Index size | $(du -h "data/${{ matrix.country }}.bin" | cut -f1) |"
-              echo "| Documents | $(jq .documents "data/${{ matrix.country }}.bin.source.json") |"
-            fi
+            awk -F': ' '/Maximum resident set size/ { printf "| Build peak memory | %.2f GiB |\n", $2 / 1048576 }
+                        /Elapsed \(wall clock\)/ { print "| Build time | " $2 " |" }' time.txt
+            manifest=$(jq -r .manifest "out/$CC.json")
+            echo "| Index | $(jq -r .file <<<"$manifest"), $(jq .size <<<"$manifest" | numfmt --to=iec) |"
+            echo "| Documents | $(jq .documents <<<"$manifest") |"
             if [ -f serve-rss.txt ]; then
               echo "| API resident memory after one search | $(cat serve-rss.txt) MiB |"
             fi
+            echo "| Published | $PUBLISH |"
           } >> "$GITHUB_STEP_SUMMARY"

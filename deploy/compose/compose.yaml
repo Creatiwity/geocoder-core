@@ -7,7 +7,9 @@
 #   docker compose run --rm update          # first build, then from cron
 #
 # Memory: serving needs little (~100-300 MB, plus the page cache of the
-# indexes, reclaimable); building the French index peaks at ~5 GB.
+# indexes, reclaimable). `update` downloads the signed prebuilt indexes when
+# GEOCODER_INDEX_BASE_URL is set (a few hundred MB); otherwise it builds
+# them, and the French index peaks at ~5 GB.
 
 name: geocoder
 
@@ -24,6 +26,7 @@ x-app: &app
     GEOCODER_ENV: ${GEOCODER_ENV:-production}
     RUST_LOG: ${RUST_LOG:-info}
     SENTRY_DSN: ${SENTRY_DSN:-}
+    GEOCODER_INDEX_BASE_URL: ${GEOCODER_INDEX_BASE_URL:-}
 
 services:
   # The image runs as 65532 (distroless nonroot): hand it the volume once.
@@ -57,7 +60,7 @@ services:
       options: {max-size: "10m", max-file: "3"}
 
   # Not started by `up`: `docker compose run --rm update`, by hand or cron.
-  # Rebuilds only the countries whose sources changed.
+  # Downloads (prebuilt) or rebuilds only the countries that changed.
   update:
     <<: *app
     command: ["update"]
