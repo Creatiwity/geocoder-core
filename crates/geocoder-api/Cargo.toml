@@ -1,0 +1,53 @@
+[package]
+name = "geocoder-api"
+version = "0.1.0"
+edition.workspace = true
+description = "HTTP geocoding API compatible with the French BAN API, serving one index per country"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "geocoder-api"
+path = "src/main.rs"
+
+[dependencies]
+geocoder-core = { path = "../geocoder-core", default-features = false }
+
+axum = { version = "0.8", features = ["json", "query"] }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.6", features = ["derive", "env"] }
+futures = "0.3"
+reqwest = { version = "0.13", default-features = false, features = [
+  "stream",
+  "rustls",
+] }
+sentry = { version = "0.49", features = [
+  "tracing",
+  "tower-axum-matched-path",
+  "panic",
+] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.53", features = [
+  "macros",
+  "fs",
+  "io-util",
+  "rt-multi-thread",
+  "signal",
+  "time",
+] }
+tower-http = { version = "0.7", features = ["cors", "trace", "compression-full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+utoipa = { version = "5.5", features = ["axum_extras", "chrono"] }
+utoipa-axum = "0.2"
+utoipa-scalar = { version = "0.3", features = ["axum"] }
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.6"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+tempfile = "3.27"

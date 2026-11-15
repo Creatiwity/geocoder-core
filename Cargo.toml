@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/geocoder-core"]
+members = ["crates/geocoder-core", "crates/geocoder-api"]
 
 [workspace.package]
 edition = "2024"
