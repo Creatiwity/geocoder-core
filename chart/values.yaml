@@ -23,6 +23,17 @@ sourceUrls: {}
 #    - https://mirror.example/openaddress-bewal.zip
 #    - https://mirror.example/openaddress-bebru.zip
 
+# Signed prebuilt indexes, built by the geocoder-core CI: the `update` jobs
+# download them (a few hundred MB of memory) instead of building them from
+# the sources (~5 GiB for France). Only manifests signed by a trusted key
+# are accepted, then the index is checked against their SHA-256.
+indexes:
+  # E.g. https://<bucket>.s3.gra.io.cloud.ovh.net (the format version is
+  # appended). Empty: built from the sources.
+  baseUrl: ""
+  # Trusted public keys, comma separated. Empty: the ones built in.
+  publicKeys: ""
+
 # How often the API checks the index files for a new build.
 reloadIntervalSeconds: 60
 
@@ -58,15 +69,11 @@ update:
   failedJobsHistoryLimit: 3
   backoffLimit: 1
   activeDeadlineSeconds: 7200
-  # Building an index is CPU bound and memory hungry: France ~6 min and up to
-  # ~5 GiB, Belgium ~1 min and ~4.5 GiB, Luxembourg seconds. Countries are
-  # built one after the other.
-  resources:
-    requests:
-      cpu: 1000m
-      memory: 5Gi
-    # limits:
-    #   memory: 6Gi
+  # Empty: 100m / 128Mi with indexes.baseUrl (a download), 1000m / 5Gi
+  # otherwise: building is CPU bound and memory hungry (France ~8 min and up
+  # to ~5 GiB, Belgium ~2 min and ~4 GiB, Luxembourg seconds), one country
+  # after the other.
+  resources: {}
 
 # Volume of the indexes, shared by the API (read only) and the update jobs.
 persistence:

@@ -47,10 +47,10 @@ spec:
               volumeMounts:
                 - name: data
                   mountPath: {{ .Values.persistence.mountPath }}
-              {{- with .Values.update.resources }}
+              {{- $download := dict "requests" (dict "cpu" "100m" "memory" "128Mi") }}
+              {{- $build := dict "requests" (dict "cpu" "1000m" "memory" "5Gi") }}
               resources:
-                {{- toYaml . | nindent 16 }}
-              {{- end }}
+                {{- toYaml (.Values.update.resources | default (ternary $download $build (not (empty .Values.indexes.baseUrl)))) | nindent 16 }}
           volumes:
             {{- include "app.dataVolume" . | nindent 12 }}
 {{- end }}

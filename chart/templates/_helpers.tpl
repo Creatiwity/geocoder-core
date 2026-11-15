@@ -94,6 +94,14 @@ user's extraEnv
   value: {{ (kindIs "slice" $urls | ternary (join "," $urls) $urls) | quote }}
 {{- end }}
 {{- end }}
+{{- with $v.indexes.baseUrl }}
+- name: "GEOCODER_INDEX_BASE_URL"
+  value: {{ . | quote }}
+{{- end }}
+{{- with $v.indexes.publicKeys }}
+- name: "GEOCODER_INDEX_PUBLIC_KEYS"
+  value: {{ . | quote }}
+{{- end }}
 - name: "RUST_LOG"
   value: {{ $v.rustLog | quote }}
 - name: "GEOCODER_ENV"
