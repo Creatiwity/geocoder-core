@@ -249,6 +249,15 @@ mod tests {
         let format = geocoder_core::index::format::VERSION;
         assert_eq!(p.base_url, format!("https://x/v{format}"));
         assert_eq!(p.keys, [key]);
+        // The built-in keys parse.
+        assert_eq!(
+            Prebuilt::new("https://x", None)
+                .unwrap()
+                .unwrap()
+                .keys
+                .len(),
+            TRUSTED_KEYS.len()
+        );
         assert!(Prebuilt::new("https://x", Some("nope")).is_err());
         assert!(Prebuilt::new("https://x", Some("")).is_err());
     }
