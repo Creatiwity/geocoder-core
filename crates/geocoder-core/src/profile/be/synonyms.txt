@@ -1,0 +1,7 @@
+# Belgium, on top of the French synonyms: Dutch abbreviations.
+strt => straat
+stwg, stw => steenweg
+ln => laan
+kon => koning
+olv => onze lieve vrouw
+burg => burgemeester

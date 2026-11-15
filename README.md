@@ -10,11 +10,11 @@ the BAN API as served by the Géoplateforme (IGN): addok 1.3 + addok-fr
 
 | Part | Role |
 |---|---|
-| `src/search` | Generic engine: addok's `Search` helper, its 13 collectors, result scoring |
-| `src/index` | Memory-mapped index: postings, token pairs, edge ngrams, geohashes, filters, documents |
-| `src/profile` | Country specific processing behind the `Profile` trait |
-| `src/readers` | Data sources converted to addok's document format |
-| `src/text` | Language-agnostic text primitives (ASCII folding, tokenizing, synonyms, ngrams) |
+| `crates/geocoder-core/src/search` | Generic engine: addok's `Search` helper, its 13 collectors, result scoring |
+| `crates/geocoder-core/src/index` | Memory-mapped index: postings, token pairs, edge ngrams, geohashes, filters, documents |
+| `crates/geocoder-core/src/profile` | Country specific processing behind the `Profile` trait |
+| `crates/geocoder-core/src/readers` | Data sources converted to addok's document format |
+| `crates/geocoder-core/src/text` | Language-agnostic text primitives (ASCII folding, tokenizing, synonyms, ngrams) |
 
 ### Profiles
 
@@ -79,7 +79,7 @@ Two levels, both against addok itself:
 1. **Pipeline, function by function** — `scripts/addok_oracle.py` runs the
    real addok code (tokens, index boosts, labels, scores) without Redis;
    `scripts/diff_pipeline.py` compares it with the Rust implementation
-   (`examples/pipeline.rs`) on documents sampled from a BAN export and
+   (`crates/geocoder-core/examples/pipeline.rs`) on documents sampled from a BAN export and
    queries derived from them.
 
    ```bash

@@ -5,7 +5,7 @@
 //! API behaviour (multi-value filters, labels for former municipalities,
 //! addok-fr 1.1 phonetics), the configuration is the published one.
 
-mod france;
+pub(crate) mod france;
 mod phonemicize;
 
 use once_cell::sync::Lazy;
@@ -16,10 +16,13 @@ use crate::text::{Synonyms, Token};
 
 pub use phonemicize::phonemicize;
 
-static SYNONYMS: Lazy<Synonyms> = Lazy::new(|| Synonyms::parse(include_str!("synonyms.txt")));
+/// addok-fr synonyms, also the base of the Benelux profiles.
+pub(crate) const SYNONYMS_SOURCE: &str = include_str!("synonyms.txt");
+
+static SYNONYMS: Lazy<Synonyms> = Lazy::new(|| Synonyms::parse(SYNONYMS_SOURCE));
 
 /// Default fields plus the Géoplateforme `EXTRA_FIELDS` (`citycode`).
-const FIELDS: &[FieldSpec] = &[
+pub(crate) const FIELDS: &[FieldSpec] = &[
     FieldSpec {
         key: "name",
         boost: Boost::Const(4.0),

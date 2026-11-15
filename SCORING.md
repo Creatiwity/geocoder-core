@@ -90,7 +90,7 @@ caractères du document et de ses numéros, filtres `source`, `type`,
 
 Les mots sont classés en *fréquents* (> 10 000 documents), *significatifs*
 (trouvés), *introuvables* ou *numéro*. Puis les 13 collecteurs d'addok 1.1
-s'enchaînent (voir `src/search/mod.rs`), dans cet ordre : intersection des
+s'enchaînent (voir `crates/geocoder-core/src/search/mod.rs`), dans cet ordre : intersection des
 mots significatifs (plus un mot fréquent s'il n'y en a qu'un), réduction par
 les mots fréquents tant qu'il y a plus de 100 candidats, autocomplete sur le
 dernier mot (candidats triés par meilleur document pour une requête d'un mot,

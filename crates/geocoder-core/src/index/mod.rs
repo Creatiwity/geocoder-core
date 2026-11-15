@@ -5,7 +5,7 @@ pub mod store;
 
 pub use builder::IndexBuilder;
 pub use format::Meta;
-pub use import::{ImportProgress, ImportStats, import};
+pub use import::{ImportProgress, ImportStats, import, import_files};
 pub use store::Index;
 
 use crate::types::DocId;
