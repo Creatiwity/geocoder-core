@@ -1,0 +1,12 @@
+{$GEOCODER_DOMAIN} {
+	encode zstd gzip
+
+	# Probes stay internal.
+	@probes path /health/*
+	respond @probes 404
+
+	reverse_proxy api:3000 {
+		health_uri /health/ready
+		health_interval 10s
+	}
+}
