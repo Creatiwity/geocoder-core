@@ -218,12 +218,13 @@ auth:
     plugins: []
 
 # Requests only by default: a CPU limit throttles the Tokio workers. The
-# indexes are memory mapped (page cache) and their FSTs copied in memory,
-# twice during a reload: France ~1.5 GiB, Belgium and Luxembourg little.
+# indexes are memory mapped: measured with fr+lu+be, ~60 MB private and
+# ~190 MB resident after 3,000 queries, the rest being page cache of the
+# index files (reclaimable, counted against the limit by some runtimes).
 resources:
   requests:
     cpu: 100m
-    memory: 2Gi
+    memory: 512Mi
 
 autoscaling:
   enabled: false
