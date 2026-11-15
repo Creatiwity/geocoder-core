@@ -10,8 +10,11 @@
 //! profile must be used to build and to query an index: its name and version
 //! are stored in the index and checked when it is opened.
 
+pub mod be;
+mod benelux;
 pub mod default;
 pub mod fr;
+pub mod lu;
 
 use std::sync::Arc;
 
@@ -129,6 +132,18 @@ pub trait Profile: Send + Sync {
     fn make_labels(&self, doc: &Document, housenumber: Option<&str>) -> Vec<String> {
         default::make_labels(doc, housenumber)
     }
+
+    /// The label shown for a result, given the ASCII folded query (empty
+    /// when reverse geocoding). `None` shows the first label, like addok's
+    /// `str(result)`.
+    fn display_label(
+        &self,
+        _doc: &Document,
+        _housenumber: Option<&str>,
+        _query: &str,
+    ) -> Option<String> {
+        None
+    }
 }
 
 /// Index-time text processing (`addok.helpers.index.preprocess`).
@@ -147,10 +162,12 @@ pub fn by_name(name: &str) -> Option<Arc<dyn Profile>> {
     match name {
         "default" => Some(Arc::new(default::DefaultProfile)),
         "fr" => Some(Arc::new(fr::FrProfile::new())),
+        "lu" => Some(Arc::new(lu::LuProfile)),
+        "be" => Some(Arc::new(be::BeProfile)),
         _ => None,
     }
 }
 
 pub fn names() -> &'static [&'static str] {
-    &["default", "fr"]
+    &["default", "fr", "lu", "be"]
 }

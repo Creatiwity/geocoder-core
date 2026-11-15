@@ -178,6 +178,11 @@ pub fn glue_ordinal(tokens: Vec<Token>) -> Vec<Token> {
     out
 }
 
+/// A street type ("rue", "av", "bd"…), as addok-france recognizes them.
+pub fn is_street_type(token: &str) -> bool {
+    TYPES_PATTERN.is_match(token)
+}
+
 /// "3bis" → "3b".
 pub fn fold_ordinal(token: Token) -> Token {
     let starts_with_digit = token.chars().next().is_some_and(|c| c.is_ascii_digit());

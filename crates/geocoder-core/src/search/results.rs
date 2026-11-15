@@ -33,6 +33,8 @@ pub struct Scored {
     pub id: DocId,
     pub doc: Document,
     pub labels: Vec<String>,
+    /// Shown instead of the first label (`Profile::display_label`).
+    pub display: Option<String>,
     pub housenumber: Option<String>,
     pub distance_km: Option<f64>,
     importance: Option<(f64, f64)>,
@@ -66,6 +68,9 @@ impl Scored {
 
     /// `str(result)`: first label, else the name.
     pub fn label(&self) -> String {
+        if let Some(display) = &self.display {
+            return display.clone();
+        }
         self.labels.first().cloned().unwrap_or_else(|| {
             crate::doc::str_values(&self.doc, "name")
                 .into_iter()
@@ -105,10 +110,14 @@ pub fn process(ctx: &Context, id: DocId, mut doc: Document) -> Option<Scored> {
     }
 
     let labels = ctx.profile.make_labels(&doc, housenumber.as_deref());
+    let display = ctx
+        .profile
+        .display_label(&doc, housenumber.as_deref(), ctx.query);
     let mut result = Scored {
         id,
         doc,
         labels,
+        display,
         housenumber,
         distance_km: None,
         importance: None,
@@ -218,10 +227,12 @@ pub fn process_reverse(
         }
     }
     let labels = profile.make_labels(&doc, housenumber.as_deref());
+    let display = profile.display_label(&doc, housenumber.as_deref(), "");
     let mut result = Scored {
         id,
         doc,
         labels,
+        display,
         housenumber,
         distance_km: None,
         importance: None,
