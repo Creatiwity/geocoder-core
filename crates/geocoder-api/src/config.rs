@@ -17,7 +17,11 @@ use geocoder_core::signed::PublicKey;
 
 /// Keys trusted by default to sign prebuilt indexes (the CI's), hex
 /// encoded. `GEOCODER_INDEX_PUBLIC_KEYS` replaces them, e.g. for a rotation.
-pub const TRUSTED_KEYS: &[&str] = &[];
+pub const TRUSTED_KEYS: &[&str] = &[
+    // INDEX_SIGNING_KEY of the geocoder-core CI (`index` environment),
+    // generated 2026-11-16.
+    "8b1390df97da26d2c93f1d0b8a8b030950a5cdac6130fd8400f11d522634ec25",
+];
 
 #[derive(Debug, Clone)]
 pub struct Country {
