@@ -111,7 +111,8 @@ fn download(url: &str, output: &Path, n: usize) -> Result<PathBuf, GeocoderError
         .call()
         .map_err(|e| GeocoderError::Io(std::io::Error::other(e.to_string())))?;
     let mut file = std::fs::File::create(&target)?;
-    std::io::copy(&mut response.into_reader(), &mut file)?;
+    // Unlike read_to_*, the reader has no size limit (the BAN export is GBs).
+    std::io::copy(&mut response.into_body().into_reader(), &mut file)?;
     Ok(target)
 }
 
