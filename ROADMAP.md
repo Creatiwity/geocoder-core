@@ -9,10 +9,10 @@ allows, one index per country, served by `geocoder-api`.
   (BeST Address, CC BY 4.0).
 - [x] Indexes built in GitHub Actions (`build-index.yml`): measured peaks
   5.1 GiB (fr), 3.9 GiB (be), 0.2 GiB (lu) on standard runners.
-- [ ] **Prebuilt indexes**: the CI publishes `v<format>/<cc>.bin` (with
-  `.sha256` and `.source.json`) to object storage (OVH S3, public read);
-  `geocoder-api update` and siren download them instead of building, so
-  neither needs more than a few hundred MB.
+- [x] **Prebuilt indexes**, signed (Ed25519): the CI publishes
+  `v<format>/<cc>.json` and the index it names; `geocoder-api update`
+  downloads and checks them. Live once the bucket and the secrets exist.
+- [ ] siren downloads the same prebuilt French index (`signed` feature).
 - [ ] First release on crates.io (0.2.0).
 
 ## Countries

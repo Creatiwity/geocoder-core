@@ -32,7 +32,8 @@ French national address API, as a library and as a ready-to-run HTTP API.
   (BD-Adresses) and Belgium (BeST Address, in French, Dutch and German),
   selected per request.
 - 🔄 **Always up to date.** `update` rebuilds an index only when its source
-  changed and the server reloads it without a restart.
+  changed, or downloads the signed prebuilt one, and the server reloads it
+  without a restart.
 
 ## At a glance
 
@@ -122,6 +123,8 @@ curl 'localhost:8080/reverse?lat=49.6116&lon=6.1319&country=lu'
 | `GEOCODER_DEFAULT_COUNTRY` | the first | Without `country` |
 | `GEOCODER_DATA_DIR` | `data` (`/data` in the image) | Indexes, sidecars, downloads |
 | `GEOCODER_SOURCE_URLS_<CC>` | built in | Comma separated URLs or paths, e.g. a mirror |
+| `GEOCODER_INDEX_BASE_URL` | | Download signed prebuilt indexes from there instead of building them |
+| `GEOCODER_INDEX_PUBLIC_KEYS` | built in | Keys trusted to sign them, comma separated (hex) |
 | `GEOCODER_RELOAD_INTERVAL_SECONDS` | 60 | Index files checked for a new build |
 | `HOST` / `PORT` | `0.0.0.0` / 8080 (3000 in the image) | |
 | `SHUTDOWN_DELAY_SECONDS` | 5 | Readiness fails this long after SIGTERM |
@@ -132,6 +135,30 @@ curl 'localhost:8080/reverse?lat=49.6116&lon=6.1319&country=lu'
 atomically.
 
 </details>
+
+### Prebuilt indexes
+
+Building France takes ~5 GB of memory, serving it ~60 MB. The
+[`Indexes`](.github/workflows/build-index.yml) workflow builds every day the
+countries whose sources changed and publishes them to object storage:
+`v<format>/<cc>.json`, a manifest signed with Ed25519 (country, format and
+profile versions, size, SHA-256, sources), and the index it names. With
+`GEOCODER_INDEX_BASE_URL`, `update` only downloads:
+
+1. the manifest must be signed by a trusted key and match this build
+   (country, format, profile), and must not be older than the local index;
+2. the index must have exactly the announced size and SHA-256, and open
+   (FST checksums included);
+3. only then it replaces the current one.
+
+The storage is not trusted: a tampered file is refused, and the index
+reader itself never panics on a damaged file (`tests/corrupted.rs`). Builds
+are reproducible: the same sources give the same SHA-256.
+
+```bash
+geocoder-api keygen 2> public.txt | gh secret set INDEX_SIGNING_KEY   # once
+GEOCODER_SIGNING_KEY=… geocoder-api publish --out out                 # what the CI runs
+```
 
 ## Deployment
 
