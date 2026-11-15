@@ -16,6 +16,10 @@ First release on crates.io.
 - geocoder-api, a BAN compatible API for several countries (3f02bbf)
 - Helm chart, image and CI for geocoder-api (2731a66)
 - Docker Compose deployment for a single host (022dba5)
+- Signed prebuilt indexes: `publish` in CI, `update` downloads and checks
+  them (`GEOCODER_INDEX_BASE_URL`), `signed` feature of the crate
+- Index reading hardened: bounds checked offsets, FST checksums, bounded
+  documents; a damaged index fails or comes back empty, never panics
 
 ### Fixes
 
