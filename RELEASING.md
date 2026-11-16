@@ -74,9 +74,12 @@ After the first publication, add co-owners if needed:
 
 ### Docker Hub
 
-Repository secrets `DOCKER_USERNAME` and `DOCKER_PASSWORD` (an access
-token with Read & Write on `creatiwity/geocoder-api`), or organization
-secrets shared with siren.
+*Settings → Environments → New environment* `docker`, without reviewers,
+with *Deployment branches and tags* limited to the branch `main` and the
+tags `v*`. Its secrets: `DOCKER_USERNAME` and `DOCKER_PASSWORD` (an access
+token with Read & Write on `creatiwity/geocoder-api` only, not the account
+password). Only the `push` job of `Image` uses it, on `main` and on
+version tags: other branches build and check without publishing.
 
 ### The `release` environment
 

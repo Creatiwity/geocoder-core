@@ -61,9 +61,14 @@ jobs:
           name: dist
           path: ./dist
 
+  # Only main and version tags publish. The Docker Hub token lives in the
+  # `docker` environment, whose deployment rule admits only `main` and `v*`
+  # tags: a branch pushed with a modified workflow cannot read it.
   push:
     needs: build
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    environment: docker
 
     steps:
       - uses: actions/download-artifact@v8
