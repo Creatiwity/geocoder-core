@@ -50,7 +50,7 @@ thread.
 
 | Profile | Source | Licence | Documents |
 |---|---|---|---|
-| `fr` | [BAN](https://adresse.data.gouv.fr/) addok export | Etalab 2.0 | 2.5 M (2.7 GB index) |
+| `fr` | [BAN](https://adresse.data.gouv.fr/) addok export | Etalab 2.0 | 2.5 M (3.3 GB index) |
 | `lu` | [BD-Adresses](https://data.public.lu/fr/datasets/adresses-georeferencees-bd-adresses/) | CC0 | 9 k |
 | `be` | [BeST Address](https://opendata.bosa.be/) (3 regions) | CC BY 4.0 | 147 k |
 

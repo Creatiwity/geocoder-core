@@ -89,7 +89,8 @@ persistence:
   accessModes:
     - ReadWriteOnce
   sameNode: true
-  # Per country, the index plus its rebuild plus the download: France ~7 GB,
+  # Per country, the index plus the new one (and, when building, the
+  # source download): France ~7 GB prebuilt, ~8 GB built here,
   # Belgium ~0.6 GB, Luxembourg ~0.1 GB.
   size: 10Gi
 

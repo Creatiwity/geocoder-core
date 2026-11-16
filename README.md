@@ -169,7 +169,7 @@ The image is [`creatiwity/geocoder-api`](https://hub.docker.com/r/creatiwity/geo
 |---|---|---|
 | Memory | ~60 MB private, ~200 MB resident with fr+lu+be | ~5 GB (fr), ~4 GB (be) |
 | Time | ~3 ms per query | ~8 min (fr), ~2 min (be), seconds (lu) |
-| Disk | 2.9 GB of indexes | plus the download and the new index |
+| Disk | 3.5 GB of indexes (fr 3.3 GB) | plus the new index while it downloads or builds |
 
 - **Kubernetes**: the [Helm chart](chart) runs the API and an `update`
   CronJob sharing a volume, with optional ListenerSet / HTTPRoute / auth

@@ -69,7 +69,7 @@ spec:
             - name: data
               mountPath: {{ .Values.persistence.mountPath }}
               readOnly: true
-          # Opening the indexes (FR: ~2.7 GB mapped, its FSTs copied in memory
+          # Opening the indexes (FR: ~3.3 GB mapped, its FSTs copied in memory
           # and their checksums verified) happens before the listener opens.
           startupProbe:
             httpGet:

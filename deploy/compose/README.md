@@ -7,8 +7,8 @@ For a single host (VPS): the API behind Caddy (automatic HTTPS) and an
 
 | | Memory | Disk |
 |---|---|---|
-| Serving fr + lu + be | ~60 MB private + the page cache of the indexes it touches (reclaimable) | 2.9 GB of indexes |
-| Building fr | ~5 GB peak, ~6 min | + ~2.7 GB rebuild + 1.2 GB download |
+| Serving fr + lu + be | ~60 MB private + the page cache of the indexes it touches (reclaimable) | 3.5 GB of indexes |
+| Building fr | ~5 GB peak, ~6 min | + ~3.3 GB rebuild + 1.3 GB download |
 | Building be / lu | ~4.5 GB peak, ~1 min / a few seconds | small |
 
 Measured on 3,000 mixed queries: 189 MB resident (of which ~120 MB index
