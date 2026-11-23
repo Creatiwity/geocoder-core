@@ -176,9 +176,9 @@ pub async fn search(
         autocomplete: Some(autocomplete),
     };
     // Off the async runtime: the index is memory mapped, a query may fault
-    // pages in.
+    // pages in. Its `geocoder.search` span nests in the request's.
     let query = q.clone();
-    let results = tokio::task::spawn_blocking(move || geocoder.search(&query, opts))
+    let results = crate::telemetry::spawn_blocking(move || geocoder.search(&query, opts))
         .await
         .map_err(|_| ApiError::Unavailable("search interrupted".into()))?;
     Ok(Json(FeatureCollection {
@@ -226,7 +226,7 @@ pub async fn reverse(
         limit: Some(limit),
         filters,
     };
-    let results = tokio::task::spawn_blocking(move || geocoder.reverse(lat, lon, opts))
+    let results = crate::telemetry::spawn_blocking(move || geocoder.reverse(lat, lon, opts))
         .await
         .map_err(|_| ApiError::Unavailable("search interrupted".into()))?;
     Ok(Json(FeatureCollection {

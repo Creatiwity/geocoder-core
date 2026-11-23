@@ -9,6 +9,7 @@
 mod error;
 mod geojson;
 mod search;
+mod trace;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -169,7 +170,9 @@ pub fn app(context: Arc<Context>) -> Router {
         .layer(tower_http::compression::CompressionLayer::new())
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(SentryHttpLayer::new().enable_transaction())
+        .layer(axum::middleware::from_fn(trace::client_context))
         .layer(NewSentryLayer::new_from_top())
+        .layer(axum::middleware::from_fn(trace::traceparent))
         // Merged after the layers on purpose: probes stay out of Sentry
         // transactions and request traces.
         .merge(probes.layer(cors_layer()))
@@ -293,6 +296,67 @@ mod tests {
         let (status, body) = get(&context, "/reverse?lat=50.0949&lon=6.0629").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["features"][0]["properties"]["housenumber"], "20");
+    }
+
+    /// The search runs on a blocking thread: its span must still nest in the
+    /// request's transaction, not start one of its own.
+    #[tokio::test]
+    async fn search_span_nests_in_the_request_transaction() {
+        use sentry::SentryFutureExt;
+        use sentry::protocol::EnvelopeItem;
+        use tracing_subscriber::prelude::*;
+
+        static SUBSCRIBER: std::sync::Once = std::sync::Once::new();
+        SUBSCRIBER.call_once(|| {
+            // Global: the blocking thread does not see a thread-local one.
+            #[allow(deprecated)]
+            let layer = sentry::integrations::tracing::layer();
+            tracing_subscriber::registry().with(layer).init();
+        });
+        let transport = sentry::test::TestTransport::new();
+        let mut options = sentry::ClientOptions::new().traces_sample_rate(1.0);
+        options.dsn = "https://public@sentry.invalid/1".parse().ok();
+        options.transport = Some(Arc::new(Arc::clone(&transport)));
+        let client = sentry::Client::from_config(options);
+        let hub = Arc::new(sentry::Hub::new(
+            Some(Arc::new(client)),
+            Arc::new(Default::default()),
+        ));
+
+        let dir = tempfile::tempdir().unwrap();
+        let context = context(dir.path());
+        let (status, _) = get(&context, "/search?q=kaesfurterstrooss")
+            .bind_hub(Arc::clone(&hub))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        hub.client().unwrap().flush(None);
+
+        let transactions: Vec<_> = transport
+            .fetch_and_clear_envelopes()
+            .into_iter()
+            .flat_map(|e| e.into_items().collect::<Vec<_>>())
+            .filter_map(|item| match item {
+                EnvelopeItem::Transaction(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        let names: Vec<_> = transactions.iter().map(|t| t.name.clone()).collect();
+        assert_eq!(names, [Some("GET /search".to_string())]);
+        let ops: Vec<&str> = transactions[0]
+            .spans
+            .iter()
+            .filter_map(|s| s.op.as_deref())
+            .collect();
+        for op in ["geocoder.search", "geocoder.collect", "geocoder.rank"] {
+            assert!(ops.contains(&op), "{op} missing from {ops:?}");
+        }
+        let search = transactions[0]
+            .spans
+            .iter()
+            .find(|s| s.op.as_deref() == Some("geocoder.search"))
+            .unwrap();
+        assert_eq!(search.data["results"], json!(1));
+        assert_eq!(search.data["profile"], json!("lu"));
     }
 
     #[tokio::test]

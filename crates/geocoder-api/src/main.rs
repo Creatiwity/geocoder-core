@@ -20,6 +20,7 @@ mod api;
 mod config;
 mod handle;
 mod sync;
+mod telemetry;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -27,7 +28,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use tracing::{error, info};
+use opentelemetry::trace::TracerProvider as _;
+use sentry::SentryFutureExt;
+use tracing::{Instrument, error, info, info_span};
 use tracing_subscriber::{EnvFilter, prelude::*};
 
 use config::Config;
@@ -73,6 +76,10 @@ enum Command {
         /// Download or rebuild even when nothing changed.
         #[arg(long)]
         force: bool,
+        /// Schedule of the CronJob running this: reported to Sentry Crons
+        /// (monitor `geocoder-update`), which alerts on a missed or failed run.
+        #[arg(long)]
+        crontab: Option<String>,
     },
     /// Build the indexes whose sources changed since the published ones
     /// (GEOCODER_INDEX_BASE_URL), with their signed manifests, into `out`.
@@ -106,91 +113,133 @@ fn main() {
                     .unwrap_or(0.1),
             ),
     ));
-    tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .with(tracing_subscriber::fmt::layer())
-        // Same layer as siren; its replacement is not settled yet.
-        .with(
-            #[allow(deprecated)]
-            sentry::integrations::tracing::layer(),
-        )
-        .init();
-
-    let cli = Cli::parse();
-    match cli.command {
-        Command::Keygen => std::process::exit(keygen()),
-        Command::PublicKey => std::process::exit(match signing_key() {
-            Some(key) => {
-                println!("{}", key.public_key());
-                0
-            }
-            None => 2,
-        }),
-        _ => {}
-    }
-    let prebuilt = config::Prebuilt::from_env().unwrap_or_else(|e| {
-        error!("Invalid configuration: {e}");
-        std::process::exit(2)
-    });
-    let config = Config::from_env(
-        &cli.countries,
-        cli.default_country.as_deref(),
-        &cli.data_dir,
-    )
-    .unwrap_or_else(|e| {
-        error!("Invalid configuration: {e}");
-        std::process::exit(2)
-    });
-
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("Cannot build Tokio runtime");
-    let code = runtime.block_on(async move {
-        match cli.command {
-            Command::Serve {
-                host,
-                port,
-                reload_interval_seconds,
-                shutdown_delay_seconds,
-            } => {
-                let addr: SocketAddr = format!("{host}:{port}")
-                    .parse()
-                    .unwrap_or_else(|e| panic!("Invalid address {host}:{port}: {e}"));
-                let indexes = handle::Indexes::open(&config);
-                indexes.watch(Duration::from_secs(reload_interval_seconds.max(1)));
-                api::serve(
-                    addr,
-                    api::Context {
-                        config,
-                        indexes,
-                        shutting_down: Arc::default(),
-                    },
-                    Duration::from_secs(shutdown_delay_seconds),
-                )
-                .await;
-                0
-            }
-            Command::Update { only, force } => {
-                for_each(&config, &only, |country| {
-                    sync::sync(country, prebuilt.as_ref(), force)
-                })
-                .await
-            }
-            Command::Publish { out, only, force } => {
-                let Some(key) = signing_key() else {
-                    return 2;
-                };
-                info!("Signing with {}", key.public_key());
-                for_each(&config, &only, |country| {
-                    sync::publish(country, &out, &key, prebuilt.as_ref(), force)
-                })
-                .await
-            }
-            Command::Keygen | Command::PublicKey => unreachable!(),
+    runtime.block_on(async {
+        // The OTLP batch exporter needs the runtime, and the tracer must
+        // exist before the layers are built.
+        let otlp = telemetry::init_otlp();
+        let otel_layer = otlp
+            .as_ref()
+            .map(|p| tracing_opentelemetry::layer().with_tracer(p.tracer("geocoder-api")));
+        tracing_subscriber::registry()
+            .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+            .with(tracing_subscriber::fmt::layer())
+            // Same layer as siren; its replacement is not settled yet.
+            .with(
+                #[allow(deprecated)]
+                sentry::integrations::tracing::layer(),
+            )
+            .with(otel_layer)
+            .init();
+
+        let code = run(Cli::parse()).bind_hub(sentry::Hub::current()).await;
+        telemetry::exit(code)
+    })
+}
+
+async fn run(cli: Cli) -> i32 {
+    match cli.command {
+        Command::Keygen => return keygen(),
+        Command::PublicKey => {
+            return match signing_key() {
+                Some(key) => {
+                    println!("{}", key.public_key());
+                    0
+                }
+                None => 2,
+            };
         }
-    });
-    std::process::exit(code)
+        _ => {}
+    }
+    let prebuilt = match config::Prebuilt::from_env() {
+        Ok(prebuilt) => prebuilt,
+        Err(e) => {
+            error!("Invalid configuration: {e}");
+            return 2;
+        }
+    };
+    let config = match Config::from_env(
+        &cli.countries,
+        cli.default_country.as_deref(),
+        &cli.data_dir,
+    ) {
+        Ok(config) => config,
+        Err(e) => {
+            error!("Invalid configuration: {e}");
+            return 2;
+        }
+    };
+
+    match cli.command {
+        Command::Serve {
+            host,
+            port,
+            reload_interval_seconds,
+            shutdown_delay_seconds,
+        } => {
+            let addr: SocketAddr = format!("{host}:{port}")
+                .parse()
+                .unwrap_or_else(|e| panic!("Invalid address {host}:{port}: {e}"));
+            let indexes = handle::Indexes::open(&config);
+            indexes.watch(Duration::from_secs(reload_interval_seconds.max(1)));
+            api::serve(
+                addr,
+                api::Context {
+                    config,
+                    indexes,
+                    shutting_down: Arc::default(),
+                },
+                Duration::from_secs(shutdown_delay_seconds),
+            )
+            .await;
+            0
+        }
+        Command::Update {
+            only,
+            force,
+            crontab,
+        } => {
+            let monitor = crontab
+                .as_deref()
+                .map(|tab| telemetry::CronMonitor::start("geocoder-update", tab));
+            let code = for_each(&config, &only, |country| {
+                sync::sync(country, prebuilt.as_ref(), force)
+            })
+            .instrument(job_span("update", &config))
+            .await;
+            if let Some(monitor) = monitor {
+                monitor.finish(code == 0);
+            }
+            code
+        }
+        Command::Publish { out, only, force } => {
+            let Some(key) = signing_key() else {
+                return 2;
+            };
+            info!("Signing with {}", key.public_key());
+            for_each(&config, &only, |country| {
+                sync::publish(country, &out, &key, prebuilt.as_ref(), force)
+            })
+            .instrument(job_span("publish", &config))
+            .await
+        }
+        Command::Keygen | Command::PublicKey => unreachable!(),
+    }
+}
+
+/// The root span of a job: a Sentry transaction, its countries as children.
+fn job_span(job: &'static str, config: &Config) -> tracing::Span {
+    let countries: Vec<&str> = config.countries.iter().map(|c| c.code.as_str()).collect();
+    info_span!(
+        "geocoder.job",
+        sentry.name = format!("geocoder-api {job}"),
+        sentry.op = "job",
+        job,
+        countries = countries.join(","),
+    )
 }
 
 fn signing_key() -> Option<SigningKey> {
@@ -233,9 +282,19 @@ where
         if !only.is_empty() && !only.iter().any(|c| c.eq_ignore_ascii_case(&country.code)) {
             continue;
         }
-        match run(country).await {
-            Ok(outcome) => info!("{}", serde_json::to_string(&outcome).unwrap_or_default()),
+        let span = info_span!(
+            "geocoder.sync",
+            sentry.op = "geocoder.sync",
+            country = %country.code,
+            status = tracing::field::Empty,
+        );
+        match run(country).instrument(span.clone()).await {
+            Ok(outcome) => {
+                span.record("status", outcome.status());
+                info!("{}", serde_json::to_string(&outcome).unwrap_or_default());
+            }
             Err(e) => {
+                span.record("status", "failed");
                 error!("[{}] update failed: {e}", country.code);
                 failed += 1;
             }

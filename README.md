@@ -175,6 +175,12 @@ The image is [`creatiwity/geocoder-api`](https://hub.docker.com/r/creatiwity/geo
   CronJob sharing a volume, with optional ListenerSet / HTTPRoute / auth
   (kgateway or APISIX). After the first install, build the indexes once:
   `kubectl create job --from=cronjob/<fullname>-update <fullname>-init`.
+- **Telemetry**, like siren's: Sentry (`SENTRY_DSN`) gets the errors, a
+  transaction per request with the geocoder-core spans below it, one per
+  job (`update`, `publish`) with a span per country, download and build,
+  and the Crons check-ins of the `update` CronJob (monitor
+  `geocoder-update`). A W3C `traceparent` joins the caller's trace.
+  `OTEL_EXPORTER_OTLP_ENDPOINT` exports the same spans over OTLP.
 - **A single host**: [Docker Compose](deploy/compose) with Caddy (HTTPS)
   and a cron line for the updates.
 

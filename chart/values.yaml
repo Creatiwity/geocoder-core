@@ -49,7 +49,9 @@ secrets:
   keys:
     sentryDsn: SENTRY_DSN
 
-# Added to every container. `env` wins over `envFrom`.
+# Added to every container. `env` wins over `envFrom`. E.g. telemetry:
+# SENTRY_TRACES_SAMPLE_RATE (0.1 by default), and OTEL_EXPORTER_OTLP_ENDPOINT
+# (plus the standard OTEL_* variables) to export the same spans over OTLP.
 envFrom: []
 extraEnv: []
 
