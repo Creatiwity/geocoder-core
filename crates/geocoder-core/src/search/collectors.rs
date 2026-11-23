@@ -46,7 +46,8 @@ const COLLECTORS: &[(&str, Collector)] = &[
     ),
 ];
 
-pub(super) fn run(helper: &mut Helper) {
+/// Runs the chain; returns the collector that stopped it, if any.
+pub(super) fn run(helper: &mut Helper) -> Option<&'static str> {
     // GEOCODER_DEBUG=1: trace the collectors on stderr, like addok's --verbose.
     let debug = std::env::var_os("GEOCODER_DEBUG").is_some();
     if debug {
@@ -74,9 +75,10 @@ pub(super) fn run(helper: &mut Helper) {
             );
         }
         if stop {
-            break;
+            return Some(name);
         }
     }
+    None
 }
 
 fn no_tokens_but_housenumbers_and_geohash(h: &mut Helper) -> bool {

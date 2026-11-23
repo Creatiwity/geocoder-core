@@ -21,6 +21,7 @@ pub mod fuzzy;
 pub mod results;
 
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use roaring::RoaringBitmap;
 
@@ -84,6 +85,23 @@ pub(crate) struct Helper<'a> {
     pub results: HashMap<DocId, Scored>,
     results_order: Vec<DocId>,
     geohash: Option<Option<RoaringBitmap>>,
+    /// Documents read and scored by `convert`, and the time spent doing so.
+    scored: usize,
+    scoring: Duration,
+}
+
+/// What a search went through, for its span.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Stats {
+    pub tokens: usize,
+    pub meaningful: usize,
+    pub common: usize,
+    /// The collector that stopped the chain, if any did.
+    pub collector: Option<&'static str>,
+    /// Candidates in the bucket once the collectors are done.
+    pub bucket: usize,
+    pub scored: usize,
+    pub scoring: Duration,
 }
 
 pub(crate) struct Query<'q> {
@@ -141,6 +159,8 @@ impl<'a> Helper<'a> {
             results: HashMap::new(),
             results_order: Vec::new(),
             geohash: None,
+            scored: 0,
+            scoring: Duration::ZERO,
         }
     }
 
@@ -401,6 +421,11 @@ impl<'a> Helper<'a> {
             .copied()
             .filter(|id| !self.results.contains_key(id))
             .collect();
+        if pending.is_empty() {
+            return;
+        }
+        let started = Instant::now();
+        self.scored += pending.len();
         for id in pending {
             // A rejected document is not kept, and would be tried again.
             if let Some(scored) = self
@@ -412,6 +437,7 @@ impl<'a> Helper<'a> {
                 self.results_order.push(id);
             }
         }
+        self.scoring += started.elapsed();
     }
 
     pub fn cream(&self) -> usize {
@@ -429,15 +455,29 @@ impl<'a> Helper<'a> {
         self.cream() > 0
     }
 
-    /// Run the collectors then rank.
-    pub fn run(mut self) -> Vec<Scored> {
+    /// Run the collectors then rank, each in its own span (INFO) under the
+    /// caller's.
+    pub fn run(mut self) -> (Vec<Scored>, Stats) {
         self.preprocess();
-        collectors::run(&mut self);
-        self.render()
+        let collector = tracing::info_span!("geocoder.collect", sentry.op = "geocoder.collect")
+            .in_scope(|| collectors::run(&mut self));
+        let mut stats = Stats {
+            tokens: self.tokens.len(),
+            meaningful: self.meaningful.len(),
+            common: self.common.len(),
+            collector,
+            bucket: self.bucket.len(),
+            ..Stats::default()
+        };
+        let ranked = tracing::info_span!("geocoder.rank", sentry.op = "geocoder.rank")
+            .in_scope(|| self.render(&mut stats));
+        (ranked, stats)
     }
 
-    fn render(mut self) -> Vec<Scored> {
+    fn render(mut self, stats: &mut Stats) -> Vec<Scored> {
         self.convert();
+        stats.scored = self.scored;
+        stats.scoring = self.scoring;
         let mut ranked: Vec<Scored> = self
             .results_order
             .iter()
