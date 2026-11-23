@@ -25,7 +25,7 @@ use reqwest::StatusCode;
 use reqwest::header::{CONTENT_LENGTH, ETAG, LAST_MODIFIED};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
-use tracing::{info, warn};
+use tracing::{Instrument, info, info_span, warn};
 
 pub use geocoder_core::signed::SourceVersion;
 
@@ -126,6 +126,18 @@ pub enum SyncOutcome {
         file: String,
         manifest: String,
     },
+}
+
+impl SyncOutcome {
+    /// Its `status`, for the span of the country.
+    pub fn status(&self) -> &'static str {
+        match self {
+            Self::UpToDate { .. } => "up_to_date",
+            Self::Built { .. } => "built",
+            Self::Downloaded { .. } => "downloaded",
+            Self::Published { .. } => "published",
+        }
+    }
 }
 
 pub fn sidecar_path(index: &Path) -> PathBuf {
@@ -268,7 +280,14 @@ async fn build(
             let ext = extension(&remote.final_url);
             let target = with_suffix(index_path, &format!(".download{n}.{ext}"));
             info!("[{}] downloading {}", country.code, remote.version.url);
-            let result = download(client, &remote.version.url, &target, remote.length).await;
+            let result = download(client, &remote.version.url, &target, remote.length)
+                .instrument(info_span!(
+                    "geocoder.download",
+                    sentry.op = "http.client",
+                    url = %remote.version.url,
+                    bytes = remote.length,
+                ))
+                .await;
             downloads.push(target.clone());
             if let Err(e) = result {
                 remove_all(&downloads).await;
@@ -288,7 +307,7 @@ async fn build(
         index_path.to_path_buf(),
         country.code.clone(),
     );
-    let built = tokio::task::spawn_blocking(move || {
+    let built = crate::telemetry::spawn_blocking(move || {
         geocoder_core::index::import_files(&inputs, source, profile, &path, |p| {
             info!(
                 "[{code}] {} lines, {} documents, {:?}",
@@ -327,7 +346,10 @@ async fn published(
     prebuilt: &Prebuilt,
 ) -> Result<Option<Manifest>, Error> {
     let url = format!("{}/{}.json", prebuilt.base_url, country.code);
-    let Some(envelope) = get_small(client, &url, MAX_MANIFEST_BYTES).await? else {
+    let Some(envelope) = get_small(client, &url, MAX_MANIFEST_BYTES)
+        .instrument(info_span!("geocoder.manifest", sentry.op = "http.client", url = %url))
+        .await?
+    else {
         return Ok(None);
     };
     let manifest = signed::verify(&envelope, &prebuilt.keys)?;
@@ -415,7 +437,14 @@ async fn fetch(country: &Country, prebuilt: &Prebuilt, force: bool) -> Result<Sy
     );
     let started = Instant::now();
     let checked = async {
-        let sha256 = download_hashed(&client, &url, &target, manifest.size).await?;
+        let sha256 = download_hashed(&client, &url, &target, manifest.size)
+            .instrument(info_span!(
+                "geocoder.download",
+                sentry.op = "http.client",
+                url = %url,
+                bytes = manifest.size,
+            ))
+            .await?;
         if sha256 != manifest.sha256 {
             return Err(Error::Integrity(format!(
                 "SHA-256 {sha256}, the manifest says {}",
@@ -424,7 +453,7 @@ async fn fetch(country: &Country, prebuilt: &Prebuilt, force: bool) -> Result<Sy
         }
         // Opens (format, profile, FST checksums) before it replaces anything.
         let path = target.clone();
-        let documents = tokio::task::spawn_blocking(move || {
+        let documents = crate::telemetry::spawn_blocking(move || {
             geocoder_core::Geocoder::open(&path).map(|g| g.meta().documents as usize)
         })
         .await??;

@@ -40,7 +40,9 @@ spec:
                 {{- toYaml .Values.securityContext | nindent 16 }}
               image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
               imagePullPolicy: {{ .Values.image.pullPolicy }}
-              args: ["update"]
+              # The schedule goes to Sentry Crons (monitor geocoder-update), which
+              # alerts on a missed or failed run when SENTRY_DSN is set.
+              args: ["update", "--crontab", {{ .Values.update.schedule | quote }}]
               {{- include "app.envFrom" . | nindent 14 }}
               env:
                 {{- include "app.env" . | nindent 16 }}
