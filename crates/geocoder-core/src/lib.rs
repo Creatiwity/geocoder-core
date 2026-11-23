@@ -39,7 +39,17 @@ pub struct Geocoder {
 
 impl Geocoder {
     pub fn open(path: &std::path::Path) -> Result<Self, GeocoderError> {
+        let span = tracing::info_span!(
+            "geocoder.open",
+            sentry.op = "geocoder.open",
+            path = %path.display(),
+            profile = tracing::field::Empty,
+            documents = tracing::field::Empty,
+        );
+        let _entered = span.enter();
         let index = Index::open(path)?;
+        span.record("profile", index.meta.profile.as_str());
+        span.record("documents", index.meta.documents);
         let profile = profile::by_name(&index.meta.profile).ok_or(GeocoderError::UnknownProfile)?;
         if profile.version() != index.meta.profile_version {
             return Err(GeocoderError::ProfileVersion {
@@ -64,24 +74,58 @@ impl Geocoder {
     }
 
     /// Forward geocoding, like addok's `/search`.
+    ///
+    /// Runs in a `geocoder.search` span (INFO) describing the query's shape,
+    /// never its text: token counts, the collector that settled it, the
+    /// documents read and scored, the results.
     pub fn search(&self, query: &str, opts: SearchOpts) -> Vec<SearchResult> {
+        let limit = opts.limit.unwrap_or(DEFAULT_LIMIT);
+        let autocomplete = opts.autocomplete.unwrap_or(true);
+        let span = tracing::info_span!(
+            "geocoder.search",
+            sentry.op = "geocoder.search",
+            profile = self.profile.name(),
+            autocomplete,
+            limit,
+            near = opts.lat.is_some() && opts.lon.is_some(),
+            filters = opts.filters.len(),
+            tokens = tracing::field::Empty,
+            meaningful = tracing::field::Empty,
+            common = tracing::field::Empty,
+            collector = tracing::field::Empty,
+            bucket = tracing::field::Empty,
+            scored = tracing::field::Empty,
+            scoring_ms = tracing::field::Empty,
+            results = tracing::field::Empty,
+        );
+        let _entered = span.enter();
         if text::ascii(query.trim()).chars().count() > QUERY_MAX_LENGTH {
+            span.record("results", 0);
             return Vec::new();
         }
-        let limit = opts.limit.unwrap_or(DEFAULT_LIMIT);
         let q = Query {
             text: query,
             // addok may be asked for more results than returned (see
             // `Profile::min_limit`): the thresholds of its collectors depend
             // on it.
             limit: limit.max(self.profile.min_limit()),
-            autocomplete: opts.autocomplete.unwrap_or(true),
+            autocomplete,
             lat: opts.lat,
             lon: opts.lon,
             filters: self.filters(&opts.filters),
         };
-        let mut results = Helper::new(&self.index, self.profile.as_ref(), &q).run();
+        let (mut results, stats) = Helper::new(&self.index, self.profile.as_ref(), &q).run();
         results.truncate(limit);
+        span.record("tokens", stats.tokens);
+        span.record("meaningful", stats.meaningful);
+        span.record("common", stats.common);
+        if let Some(collector) = stats.collector {
+            span.record("collector", collector);
+        }
+        span.record("bucket", stats.bucket);
+        span.record("scored", stats.scored);
+        span.record("scoring_ms", stats.scoring.as_secs_f64() * 1000.0);
+        span.record("results", results.len());
         results.into_iter().map(to_result).collect()
     }
 
@@ -99,6 +143,16 @@ impl Geocoder {
     /// Reverse geocoding, like addok's `/reverse`.
     pub fn reverse(&self, lat: f64, lon: f64, opts: ReverseOpts) -> Vec<SearchResult> {
         let limit = opts.limit.unwrap_or(1);
+        let span = tracing::info_span!(
+            "geocoder.reverse",
+            sentry.op = "geocoder.reverse",
+            profile = self.profile.name(),
+            limit,
+            filters = opts.filters.len(),
+            candidates = tracing::field::Empty,
+            results = tracing::field::Empty,
+        );
+        let _entered = span.enter();
         let filters = self.filters(&opts.filters);
         let type_filter = filters.iter().find(|(k, _)| k == "type").map(|(_, v)| v);
         let check_housenumber =
@@ -141,6 +195,7 @@ impl Geocoder {
             fetch(&next, &mut keys, &mut fetched);
         }
 
+        span.record("candidates", keys.len());
         let mut results: Vec<Scored> = keys
             .into_iter()
             .filter_map(|id| {
@@ -162,6 +217,7 @@ impl Geocoder {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         results.truncate(limit);
+        span.record("results", results.len());
         results.into_iter().map(to_result).collect()
     }
 

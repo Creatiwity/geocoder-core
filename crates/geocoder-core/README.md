@@ -74,6 +74,19 @@ geocoder-build --source addok --profile fr \
 geocoder-search fr.bin 8 bd du port nanterre
 ```
 
+## Tracing
+
+Searches, reverse lookups, index opening and builds run in
+[`tracing`](https://docs.rs/tracing) spans (INFO): `geocoder.search` (with
+`geocoder.collect` and `geocoder.rank`), `geocoder.reverse`,
+`geocoder.open`, `geocoder.import` (with `geocoder.write`). Their fields
+describe a query's shape, never its text: token counts, the collector that
+settled it, the documents scored and the time spent scoring them, the
+results. Nothing is recorded without a subscriber; with Sentry's or
+OpenTelemetry's, they show up under the caller's span. Calling from
+`spawn_blocking`, carry that span (and the Sentry hub) into the closure,
+or they start traces of their own.
+
 ## Licence
 
 MIT. Ports addok, addok-fr and addok-france (MIT, Etalab / DINUM). The

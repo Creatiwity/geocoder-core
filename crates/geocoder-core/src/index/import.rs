@@ -43,10 +43,12 @@ pub fn import(
     output: &Path,
     progress: impl FnMut(ImportProgress),
 ) -> Result<ImportStats, GeocoderError> {
+    let span = import_span(source, output);
+    let _entered = span.enter();
     let mut importer = Importer::new(profile, progress);
     let mut reader = reader;
     importer.read(&mut reader, source)?;
-    importer.finish(output)
+    record(&span, importer.finish(output))
 }
 
 /// [`import`] over several files (e.g. the three regions of Belgium), each
@@ -58,11 +60,39 @@ pub fn import_files(
     output: &Path,
     progress: impl FnMut(ImportProgress),
 ) -> Result<ImportStats, GeocoderError> {
+    let span = import_span(source, output);
+    let _entered = span.enter();
     let mut importer = Importer::new(profile, progress);
     for input in inputs {
         for_each_input(input, |reader| importer.read(reader, source))?;
     }
-    importer.finish(output)
+    record(&span, importer.finish(output))
+}
+
+/// `geocoder.import` (INFO), around reading the sources and writing the
+/// index (`geocoder.write`).
+fn import_span(source: Source, output: &Path) -> tracing::Span {
+    tracing::info_span!(
+        "geocoder.import",
+        sentry.op = "geocoder.import",
+        source = source.name(),
+        output = %output.display(),
+        documents = tracing::field::Empty,
+        skipped = tracing::field::Empty,
+        invalid = tracing::field::Empty,
+    )
+}
+
+fn record(
+    span: &tracing::Span,
+    stats: Result<ImportStats, GeocoderError>,
+) -> Result<ImportStats, GeocoderError> {
+    if let Ok(stats) = &stats {
+        span.record("documents", stats.documents);
+        span.record("skipped", stats.skipped);
+        span.record("invalid", stats.invalid);
+    }
+    stats
 }
 
 struct Importer<P> {
@@ -155,7 +185,9 @@ impl<P: FnMut(ImportProgress)> Importer<P> {
         }
 
         let tmp = temporary_path(output);
-        if let Err(e) = self.builder.build(&tmp) {
+        let built = tracing::info_span!("geocoder.write", sentry.op = "geocoder.write", documents)
+            .in_scope(|| self.builder.build(&tmp));
+        if let Err(e) = built {
             let _ = std::fs::remove_file(&tmp);
             return Err(e);
         }
