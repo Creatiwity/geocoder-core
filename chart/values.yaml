@@ -50,8 +50,10 @@ secrets:
     sentryDsn: SENTRY_DSN
 
 # Added to every container. `env` wins over `envFrom`. E.g. telemetry:
-# SENTRY_TRACES_SAMPLE_RATE (0.1 by default), and OTEL_EXPORTER_OTLP_ENDPOINT
-# (plus the standard OTEL_* variables) to export the same spans over OTLP.
+# SENTRY_TRACES_SAMPLE_RATE (0.1 by default), OTEL_EXPORTER_OTLP_ENDPOINT
+# (plus the standard OTEL_* variables) to export the same spans and the logs
+# over OTLP (OTEL_LOGS_EXPORTER=none: spans only), LOG_FORMAT for stdout
+# (text, json or none; keep it for `kubectl logs`).
 envFrom: []
 extraEnv: []
 

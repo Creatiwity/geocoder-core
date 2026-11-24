@@ -28,10 +28,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use opentelemetry::trace::TracerProvider as _;
 use sentry::SentryFutureExt;
 use tracing::{Instrument, error, info, info_span};
-use tracing_subscriber::{EnvFilter, prelude::*};
 
 use config::Config;
 use geocoder_core::signed::SigningKey;
@@ -118,23 +116,7 @@ fn main() {
         .build()
         .expect("Cannot build Tokio runtime");
     runtime.block_on(async {
-        // The OTLP batch exporter needs the runtime, and the tracer must
-        // exist before the layers are built.
-        let otlp = telemetry::init_otlp();
-        let otel_layer = otlp
-            .as_ref()
-            .map(|p| tracing_opentelemetry::layer().with_tracer(p.tracer("geocoder-api")));
-        tracing_subscriber::registry()
-            .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-            .with(tracing_subscriber::fmt::layer())
-            // Same layer as siren; its replacement is not settled yet.
-            .with(
-                #[allow(deprecated)]
-                sentry::integrations::tracing::layer(),
-            )
-            .with(otel_layer)
-            .init();
-
+        telemetry::init();
         let code = run(Cli::parse()).bind_hub(sentry::Hub::current()).await;
         telemetry::exit(code)
     })
@@ -172,6 +154,21 @@ async fn run(cli: Cli) -> i32 {
             return 2;
         }
     };
+    info!(
+        "Countries: {} (default {}), prebuilt indexes {}",
+        config
+            .countries
+            .iter()
+            .map(|c| c.code.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        config.default_country,
+        prebuilt
+            .as_ref()
+            .map_or("off (built from the sources)".to_string(), |p| p
+                .base_url
+                .clone()),
+    );
 
     match cli.command {
         Command::Serve {

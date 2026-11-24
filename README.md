@@ -180,7 +180,9 @@ The image is [`creatiwity/geocoder-api`](https://hub.docker.com/r/creatiwity/geo
   job (`update`, `publish`) with a span per country, download and build,
   and the Crons check-ins of the `update` CronJob (monitor
   `geocoder-update`). A W3C `traceparent` joins the caller's trace.
-  `OTEL_EXPORTER_OTLP_ENDPOINT` exports the same spans over OTLP.
+  `OTEL_EXPORTER_OTLP_ENDPOINT` exports the same spans and the logs over
+  OTLP, each log with its trace (`OTEL_LOGS_EXPORTER=none`: spans only).
+  `LOG_FORMAT` sets stdout: `text` (default), `json` or `none`.
 - **A single host**: [Docker Compose](deploy/compose) with Caddy (HTTPS)
   and a cron line for the updates.
 
