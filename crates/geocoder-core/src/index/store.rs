@@ -9,6 +9,7 @@ use roaring::RoaringBitmap;
 use super::format::{HEADER_SIZE, MAGIC, Meta, SECTION_HEADER_SIZE, SectionKind, VERSION};
 use crate::doc::Document;
 use crate::error::GeocoderError;
+use crate::postal::CedexTable;
 use crate::types::{DocId, TokenId};
 
 /// A read-only index, memory mapped. Only the FSTs are copied in memory;
@@ -26,6 +27,7 @@ pub struct Index {
     ngram_fst: Map<Vec<u8>>,
     geohash_fst: Map<Vec<u8>>,
     filter_fst: Map<Vec<u8>>,
+    cedex: Option<CedexTable>,
 }
 
 impl Index {
@@ -62,7 +64,10 @@ impl Index {
             ranges[kind as usize] = (offset as usize, end as usize);
             found[kind as usize] = true;
         }
-        if found.iter().any(|f| !f) {
+        if SectionKind::ALL
+            .iter()
+            .any(|k| !found[*k as usize] && !SectionKind::OPTIONAL.contains(k))
+        {
             return Err(GeocoderError::InvalidIndex("missing section"));
         }
         let section = |kind: SectionKind| {
@@ -81,6 +86,10 @@ impl Index {
         let ngram_fst = fst(SectionKind::NgramFst)?;
         let geohash_fst = fst(SectionKind::GeohashFst)?;
         let filter_fst = fst(SectionKind::FilterFst)?;
+        let cedex = match found[SectionKind::Postal as usize] {
+            true => Some(CedexTable::from_bytes(section(SectionKind::Postal))?),
+            false => None,
+        };
         Ok(Self {
             mmap,
             ranges,
@@ -89,7 +98,13 @@ impl Index {
             ngram_fst,
             geohash_fst,
             filter_fst,
+            cedex,
         })
+    }
+
+    /// The CEDEX table the index was built with, if any.
+    pub fn cedex(&self) -> Option<&CedexTable> {
+        self.cedex.as_ref()
     }
 
     fn section(&self, kind: SectionKind) -> &[u8] {

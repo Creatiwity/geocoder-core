@@ -298,6 +298,13 @@ async fn build(
             inputs.push(PathBuf::from(&remote.version.url));
         }
     }
+    // Read as they stream, not part of the change detection: refreshed
+    // whenever the address sources change.
+    let cedex = if country.cedex && crate::cedex::enabled() {
+        crate::cedex::table().await
+    } else {
+        None
+    };
     let download_time = started.elapsed();
 
     // Build off the async runtime: CPU bound for minutes.
@@ -308,7 +315,7 @@ async fn build(
         country.code.clone(),
     );
     let built = crate::telemetry::spawn_blocking(move || {
-        geocoder_core::index::import_files(&inputs, source, profile, &path, |p| {
+        geocoder_core::index::import_files(&inputs, source, profile, &path, cedex, |p| {
             info!(
                 "[{code}] {} lines, {} documents, {:?}",
                 p.lines, p.documents, p.elapsed

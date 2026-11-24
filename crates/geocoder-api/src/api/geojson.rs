@@ -37,7 +37,10 @@ pub struct Feature {
     pub geometry: Point,
     /// `label`, `score`, `housenumber`, `id`, `name`, `postcode`,
     /// `citycode`, `city`, `context`, `type`, `importance`, `street`,
-    /// `distance` (meters, with a center).
+    /// `distance` (meters, with a center). With a CEDEX in the query,
+    /// `cedex` (`code`, `label`: as written, normalized) and `postal_label`,
+    /// the address to write on mail ("1 Avenue du Général de Gaulle 92074
+    /// PARIS LA DEFENSE CEDEX"); the other fields are the geographic place.
     #[schema(value_type = Object)]
     pub properties: Map<String, Value>,
 }
@@ -127,6 +130,15 @@ pub fn feature(result: &SearchResult, country: &Country) -> Feature {
     if let Some(km) = result.distance_km {
         properties.insert("distance".into(), Value::from((km * 1000.0).round() as u64));
     }
+    // The CEDEX line of the query, given back: the place was searched,
+    // the mail address keeps it.
+    if let (Some(line), Some(label)) = (&result.postal, &result.postal_label) {
+        properties.insert(
+            "cedex".into(),
+            serde_json::to_value(line).unwrap_or(Value::Null),
+        );
+        properties.insert("postal_label".into(), Value::String(label.clone()));
+    }
     Feature {
         kind: "Feature",
         geometry: Point {
@@ -163,6 +175,7 @@ mod tests {
             attribution: "",
             licence: "",
             number_after_street: after,
+            cedex: false,
         }
     }
 
@@ -178,6 +191,8 @@ mod tests {
             lat: 50.84617,
             lon: 4.36654,
             distance_km: None,
+            postal: None,
+            postal_label: None,
         };
         let f = feature(&result, &country(true));
         let p = &f.properties;

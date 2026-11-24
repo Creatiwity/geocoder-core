@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use super::IndexBuilder;
 use crate::doc::Document;
 use crate::error::GeocoderError;
+use crate::postal::CedexTable;
 use crate::profile::Profile;
 use crate::readers::{Source, be, for_each_input, grouped::Grouper, lu};
 
@@ -35,17 +36,19 @@ pub const PROGRESS_EVERY: usize = 200_000;
 ///
 /// The index is written to a temporary file next to `output`, then renamed:
 /// a process opening `output` meanwhile sees the previous index, never a
-/// partial one. Invalid lines are counted and skipped.
+/// partial one. Invalid lines are counted and skipped. `cedex`: stored with
+/// the index, for the `fr` profile (see [`crate::postal`]).
 pub fn import(
     reader: impl BufRead,
     source: Source,
     profile: Arc<dyn Profile>,
     output: &Path,
+    cedex: Option<CedexTable>,
     progress: impl FnMut(ImportProgress),
 ) -> Result<ImportStats, GeocoderError> {
     let span = import_span(source, output);
     let _entered = span.enter();
-    let mut importer = Importer::new(profile, progress);
+    let mut importer = Importer::new(profile, cedex, progress);
     let mut reader = reader;
     importer.read(&mut reader, source)?;
     record(&span, importer.finish(output))
@@ -58,11 +61,12 @@ pub fn import_files(
     source: Source,
     profile: Arc<dyn Profile>,
     output: &Path,
+    cedex: Option<CedexTable>,
     progress: impl FnMut(ImportProgress),
 ) -> Result<ImportStats, GeocoderError> {
     let span = import_span(source, output);
     let _entered = span.enter();
-    let mut importer = Importer::new(profile, progress);
+    let mut importer = Importer::new(profile, cedex, progress);
     for input in inputs {
         for_each_input(input, |reader| importer.read(reader, source))?;
     }
@@ -107,9 +111,13 @@ struct Importer<P> {
 }
 
 impl<P: FnMut(ImportProgress)> Importer<P> {
-    fn new(profile: Arc<dyn Profile>, progress: P) -> Self {
+    fn new(profile: Arc<dyn Profile>, cedex: Option<CedexTable>, progress: P) -> Self {
+        let mut builder = IndexBuilder::new(profile);
+        if let Some(table) = cedex {
+            builder.set_cedex(table);
+        }
         Self {
-            builder: IndexBuilder::new(profile),
+            builder,
             progress,
             started: Instant::now(),
             lines: 0,

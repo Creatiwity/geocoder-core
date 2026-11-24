@@ -96,6 +96,9 @@ fn to_json(r: &SearchResult) -> serde_json::Value {
         "id": r.doc.get("id"),
         "lat": r.lat,
         "lon": r.lon,
+        "citycode": r.doc.get("citycode"),
+        "postal": r.postal,
+        "postal_label": r.postal_label,
     })
 }
 

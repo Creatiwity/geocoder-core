@@ -8,6 +8,7 @@
 pub mod ban;
 pub mod bano;
 pub mod be;
+pub mod cedex;
 pub mod grouped;
 pub mod lu;
 

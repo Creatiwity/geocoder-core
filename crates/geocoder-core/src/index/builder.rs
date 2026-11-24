@@ -15,6 +15,7 @@ use super::format::{MAGIC, Meta, SECTION_HEADER_SIZE, SectionHeader, SectionKind
 use super::tie_break;
 use crate::doc::{Document, first_f64, py_str, truthy};
 use crate::error::GeocoderError;
+use crate::postal::CedexTable;
 use crate::profile::{Profile, preprocess};
 use crate::settings::{GEOHASH_PRECISION, IMPORTANCE_WEIGHT, MAX_EDGE_NGRAMS, MIN_EDGE_NGRAMS};
 use crate::text::edge_ngrams;
@@ -36,6 +37,7 @@ pub struct IndexBuilder {
     /// `addok.helpers.index._CACHE`: field values repeat a lot.
     cache: HashMap<String, Vec<String>>,
     skipped: usize,
+    cedex: Option<CedexTable>,
 }
 
 impl IndexBuilder {
@@ -52,7 +54,13 @@ impl IndexBuilder {
             doc_blobs: Vec::new(),
             cache: HashMap::new(),
             skipped: 0,
+            cedex: None,
         }
+    }
+
+    /// The CEDEX table to store with the index (`Postal` section).
+    pub fn set_cedex(&mut self, table: CedexTable) {
+        self.cedex = Some(table);
     }
 
     pub fn documents(&self) -> usize {
@@ -274,7 +282,8 @@ impl IndexBuilder {
         }
 
         let meta_bytes = serde_json::to_vec(&meta)?;
-        let sections: Vec<(SectionKind, &[u8])> = vec![
+        let cedex = self.cedex.as_ref().map(CedexTable::to_bytes).transpose()?;
+        let mut sections: Vec<(SectionKind, &[u8])> = vec![
             (SectionKind::Meta, &meta_bytes),
             (SectionKind::TokenFst, &token_fst),
             (SectionKind::PostingOffsets, &posting_offsets),
@@ -294,6 +303,9 @@ impl IndexBuilder {
             (SectionKind::DocOffsets, &doc_offsets),
             (SectionKind::DocBlobs, &self.doc_blobs),
         ];
+        if let Some(cedex) = &cedex {
+            sections.push((SectionKind::Postal, cedex));
+        }
         write_sections(path, &sections)
     }
 }

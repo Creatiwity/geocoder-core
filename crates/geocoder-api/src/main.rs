@@ -17,6 +17,7 @@
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod api;
+mod cedex;
 mod config;
 mod handle;
 mod sync;

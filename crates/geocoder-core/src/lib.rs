@@ -9,6 +9,7 @@
 pub mod doc;
 mod error;
 pub mod index;
+pub mod postal;
 pub mod profile;
 pub mod readers;
 pub mod search;
@@ -97,24 +98,69 @@ impl Geocoder {
             scored = tracing::field::Empty,
             scoring_ms = tracing::field::Empty,
             results = tracing::field::Empty,
+            postal = tracing::field::Empty,
         );
         let _entered = span.enter();
         if text::ascii(query.trim()).chars().count() > QUERY_MAX_LENGTH {
             span.record("results", 0);
             return Vec::new();
         }
-        let q = Query {
-            text: query,
-            // addok may be asked for more results than returned (see
-            // `Profile::min_limit`): the thresholds of its collectors depend
-            // on it.
-            limit: limit.max(self.profile.min_limit()),
-            autocomplete,
-            lat: opts.lat,
-            lon: opts.lon,
-            filters: self.filters(&opts.filters),
+        let filters = self.filters(&opts.filters);
+        // addok may be asked for more results than returned (see
+        // `Profile::min_limit`): the thresholds of its collectors depend
+        // on it.
+        let wanted = limit.max(self.profile.min_limit());
+        let run = |text: &str, filters: Vec<(String, Vec<String>)>| {
+            let q = Query {
+                text,
+                limit: wanted,
+                autocomplete,
+                lat: opts.lat,
+                lon: opts.lon,
+                filters,
+            };
+            Helper::new(&self.index, self.profile.as_ref(), &q).run()
         };
-        let (mut results, stats) = Helper::new(&self.index, self.profile.as_ref(), &q).run();
+
+        let postal = self.profile.postal(query);
+        let (mut results, stats) = match &postal {
+            None => run(query, filters),
+            Some(p) => {
+                let plan = self.postal_plan(query, p, &filters);
+                span.record("postal", plan.route);
+                let restricted = plan.filters != filters;
+                let best = |r: &(Vec<Scored>, _)| r.0.first().map_or(0.0, Scored::score);
+                let mut found = run(&plan.text, plan.filters.clone());
+                if restricted {
+                    // Restricted to the right municipalities, the locality
+                    // helps when it names one (LILLE) and hurts when it does
+                    // not (PARIS LA DEFENSE): both are tried.
+                    let names_it = found
+                        .0
+                        .first()
+                        .is_some_and(|r| names_city(&r.doc, &p.locality));
+                    if !names_it {
+                        let without = run(&plan.without_locality, plan.filters);
+                        if best(&without) > best(&found) {
+                            found = without;
+                        }
+                    }
+                }
+                if best(&found) < POSTAL_FALLBACK_SCORE && plan.text != plan.fallback {
+                    // The table may be wrong or stale, the locality not a
+                    // place: the query as before, anywhere, if it does better.
+                    let anywhere = run(&plan.fallback, filters);
+                    if best(&anywhere) > best(&found) {
+                        span.record("postal", "fallback");
+                        anywhere
+                    } else {
+                        found
+                    }
+                } else {
+                    found
+                }
+            }
+        };
         results.truncate(limit);
         span.record("tokens", stats.tokens);
         span.record("meaningful", stats.meaningful);
@@ -126,7 +172,79 @@ impl Geocoder {
         span.record("scored", stats.scored);
         span.record("scoring_ms", stats.scoring.as_secs_f64() * 1000.0);
         span.record("results", results.len());
-        results.into_iter().map(to_result).collect()
+        results
+            .into_iter()
+            .map(to_result)
+            .map(|r| match &postal {
+                Some(p) => with_postal(r, &p.line),
+                None => r,
+            })
+            .collect()
+    }
+
+    /// What to search for a query carrying a delivery line:
+    /// - its code is a real postcode: the line, without the delivery words;
+    /// - the code is known: the municipalities it serves, as a filter;
+    /// - the locality is known (a business district, a new town): idem;
+    /// - otherwise the locality as written.
+    ///
+    /// A `citycode` filter given by the caller wins over the table's.
+    fn postal_plan(
+        &self,
+        query: &str,
+        p: &profile::Postal,
+        filters: &[(String, Vec<String>)],
+    ) -> PostalPlan {
+        let with = |middle: &str| {
+            let text = format!(
+                "{} {middle} {}",
+                &query[..p.range.start],
+                &query[p.range.end..]
+            );
+            text.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        // The query as is: addok-france keeps the department of the code,
+        // what the geocoder did before CEDEX lines were handled.
+        let fallback = query.to_string();
+        let filtered = |route: &'static str, citycodes: &[String]| {
+            let mut out = filters.to_vec();
+            if !out.iter().any(|(k, _)| k == "citycode") {
+                out.push(("citycode".into(), citycodes.to_vec()));
+                out.sort();
+            }
+            // The locality stays: it names the municipality among those of
+            // the code (59012 LILLE CEDEX serves Lille and Dunkerque).
+            PostalPlan {
+                route,
+                text: with(&p.locality),
+                without_locality: with(""),
+                filters: out,
+                fallback: fallback.clone(),
+            }
+        };
+        let plain = |route: &'static str, text: String| PostalPlan {
+            route,
+            without_locality: text.clone(),
+            text,
+            filters: filters.to_vec(),
+            fallback: fallback.clone(),
+        };
+        let table = self.index.cedex();
+        let by_code = p
+            .line
+            .code
+            .as_deref()
+            .zip(table)
+            .map_or(&[][..], |(code, t)| t.by_code(code));
+        let by_locality = table.map_or(&[][..], |t| t.by_locality(&p.locality));
+        match p.line.code.as_deref() {
+            Some(code) if !self.index.filter("postcode", code).is_empty() => {
+                plain("postcode", with(&format!("{code} {}", p.locality)))
+            }
+            _ if !by_code.is_empty() => filtered("code", by_code),
+            _ if !by_locality.is_empty() => filtered("locality", by_locality),
+            _ => plain("unknown", with(&p.locality)),
+        }
     }
 
     /// Same as [`Geocoder::search`] with autocomplete forced on.
@@ -250,6 +368,43 @@ impl Geocoder {
     }
 }
 
+/// Below this, a search restricted to the municipalities of a CEDEX is
+/// tried again without the restriction.
+const POSTAL_FALLBACK_SCORE: f64 = 0.5;
+
+/// Whether one of the document's cities is `locality` ("PARIS LA DEFENSE",
+/// "ST QUENTIN"), ignoring case, accents and punctuation.
+fn names_city(doc: &Document, locality: &str) -> bool {
+    let words = |s: &str| -> Vec<String> {
+        text::ascii(s)
+            .to_uppercase()
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(|w| match w {
+                "ST" => "SAINT".to_string(),
+                "STE" => "SAINTE".to_string(),
+                w => w.to_string(),
+            })
+            .collect()
+    };
+    let wanted = words(locality);
+    !wanted.is_empty()
+        && doc::str_values(doc, "city")
+            .iter()
+            .any(|city| words(city) == wanted)
+}
+
+struct PostalPlan {
+    /// For the `geocoder.search` span: how the place was found.
+    route: &'static str,
+    text: String,
+    /// `text` without the locality, tried too when restricted.
+    without_locality: String,
+    filters: Vec<(String, Vec<String>)>,
+    /// Searched when `text` finds nothing.
+    fallback: String,
+}
+
 fn to_result(r: Scored) -> SearchResult {
     SearchResult {
         label: r.label(),
@@ -259,5 +414,39 @@ fn to_result(r: Scored) -> SearchResult {
         lon: r.lon(),
         distance_km: r.distance_km,
         doc: serde_json::Value::Object(r.doc),
+        postal: None,
+        postal_label: None,
     }
+}
+
+/// The delivery line given back, and the mail label: the street part of the
+/// result (none for a municipality), then the line.
+fn with_postal(mut r: SearchResult, line: &profile::PostalLine) -> SearchResult {
+    let name = r
+        .doc
+        .get("name")
+        .and_then(|n| match n {
+            serde_json::Value::Array(a) => a.first(),
+            n => Some(n),
+        })
+        .and_then(|n| n.as_str())
+        .map(str::to_string);
+    let kind = r
+        .doc
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or_default();
+    let street = match (kind, name) {
+        ("municipality", _) | (_, None) => None,
+        (_, Some(name)) => Some(match &r.housenumber {
+            Some(hn) => format!("{hn} {name}"),
+            None => name,
+        }),
+    };
+    r.postal_label = Some(match street {
+        Some(street) => format!("{street} {}", line.line()),
+        None => line.line(),
+    });
+    r.postal = Some(line.clone());
+    r
 }

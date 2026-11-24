@@ -1119,6 +1119,7 @@ dependencies = [
  "axum",
  "chrono",
  "clap",
+ "flate2",
  "futures",
  "geocoder-core",
  "getrandom 0.4.3",

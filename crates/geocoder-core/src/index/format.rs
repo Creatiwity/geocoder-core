@@ -52,10 +52,17 @@ pub enum SectionKind {
     DocOffsets = 16,
     /// zlib-compressed JSON documents.
     DocBlobs = 17,
+    /// Optional: [`CedexTable`](crate::postal::CedexTable). Readers that
+    /// do not know it skip it, so its absence or presence needs no new
+    /// format version.
+    Postal = 18,
 }
 
 impl SectionKind {
-    pub const ALL: [SectionKind; 18] = [
+    /// Sections an index may lack.
+    pub const OPTIONAL: [SectionKind; 1] = [Self::Postal];
+
+    pub const ALL: [SectionKind; 19] = [
         Self::Meta,
         Self::TokenFst,
         Self::PostingOffsets,
@@ -74,6 +81,7 @@ impl SectionKind {
         Self::FilterBlobs,
         Self::DocOffsets,
         Self::DocBlobs,
+        Self::Postal,
     ];
 }
 
