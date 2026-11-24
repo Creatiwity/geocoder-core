@@ -5,6 +5,7 @@
 //! API behaviour (multi-value filters, labels for former municipalities,
 //! addok-fr 1.1 phonetics), the configuration is the published one.
 
+mod cedex;
 pub(crate) mod france;
 mod phonemicize;
 
@@ -97,6 +98,11 @@ impl Profile for FrProfile {
         let query = france::extract_address(query);
         let query = france::clean_query(&query);
         france::remove_leading_zeros(&query)
+    }
+
+    /// CEDEX lines ("92074 PARIS LA DEFENSE CEDEX").
+    fn postal(&self, query: &str) -> Option<super::Postal> {
+        cedex::postal(query)
     }
 
     /// `glue_ordinal`, `fold_ordinal`, `flag_housenumber`, `synonymize`,

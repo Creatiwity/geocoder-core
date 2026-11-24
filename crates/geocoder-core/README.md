@@ -61,6 +61,13 @@ differs (query cleanup, housenumbers, synonyms, phonetics, labels, filters).
 The profile name and version are stored in the index: opening an index built
 by an incompatible version fails instead of returning wrong results.
 
+France: an index can carry a CEDEX table ([`postal::CedexTable`], built with
+[`readers::cedex`] and `IndexBuilder::set_cedex`), in an optional section
+older readers skip. A query with a CEDEX line ("92074 Paris La Défense
+Cedex") is then searched as the municipality it serves, and its results
+carry the line as written (`SearchResult::postal`, `postal_label`); without
+a table the line is still given back.
+
 ## Building indexes
 
 Building takes memory: about 5 GB and 6 minutes for France, 4 GB for

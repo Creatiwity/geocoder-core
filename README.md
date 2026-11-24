@@ -126,6 +126,7 @@ curl 'localhost:8080/reverse?lat=49.6116&lon=6.1319&country=lu'
 | `GEOCODER_INDEX_BASE_URL` | | Download signed prebuilt indexes from there instead of building them |
 | `GEOCODER_INDEX_PUBLIC_KEYS` | built in | Keys trusted to sign them, comma separated (hex) |
 | `GEOCODER_RELOAD_INTERVAL_SECONDS` | 60 | Index files checked for a new build |
+| `GEOCODER_CEDEX` | `true` | Build the CEDEX table into the `fr` index (see below) |
 | `HOST` / `PORT` | `0.0.0.0` / 8080 (3000 in the image) | |
 | `SHUTDOWN_DELAY_SECONDS` | 5 | Readiness fails this long after SIGTERM |
 | `SENTRY_DSN`, `GEOCODER_ENV`, `RUST_LOG` | | |
@@ -135,6 +136,33 @@ curl 'localhost:8080/reverse?lat=49.6116&lon=6.1319&country=lu'
 atomically.
 
 </details>
+
+### CEDEX addresses
+
+A CEDEX code ("92074 PARIS LA DEFENSE CEDEX") is a La Poste delivery code,
+not a place: the BAN does not know it, and the BAN API either finds the
+wrong municipality or a low score. The `fr` index carries a table of the
+municipalities each CEDEX serves (~11 000 codes), built with the index from
+open sources, all streamed: the CEDEX list rebuilt from SIRENE in 2017,
+FINESS+ (health and social establishments, monthly) and the Annuaire de
+l'administration (daily). La Poste's own list (Hexaposte) is not open, and
+SIRENE no longer publishes the CEDEX of establishments.
+
+A query with a CEDEX line is searched as the place it stands for (the
+municipalities of the code, or its label when it names one); results keep
+the geographic fields and add `cedex` (`code`, `label`: the line as
+written, normalized) and `postal_label`, the address to write on mail:
+
+```
+1, avenue du Général-de-Gaulle, 92074 Paris La Défense Cedex
+→ label        1 Avenue du Général de Gaulle 92800 Puteaux   (score 0.97)
+  postal_label 1 Avenue du Général de Gaulle 92074 PARIS LA DEFENSE CEDEX
+```
+
+The line is given back even when the code is unknown. On 3 000 CEDEX
+addresses of FINESS, results accepted (score ≥ 0.5) at the right place went
+from 96.9 % to 99.8 %, the median score from 0.63 to 0.82. A search below
+0.5 is tried again as the BAN API would: never worse than before.
 
 ### Prebuilt indexes
 
@@ -153,7 +181,8 @@ profile versions, size, SHA-256, sources), and the index it names. With
 
 The storage is not trusted: a tampered file is refused, and the index
 reader itself never panics on a damaged file (`tests/corrupted.rs`). Builds
-are reproducible: the same sources give the same SHA-256.
+are reproducible: the same sources give the same SHA-256 (for France, the
+same CEDEX sources too: they are read at build time, not compared).
 
 ```bash
 geocoder-api keygen 2> public.txt | gh secret set INDEX_SIGNING_KEY   # once

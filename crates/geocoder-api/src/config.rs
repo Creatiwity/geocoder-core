@@ -36,6 +36,8 @@ pub struct Country {
     pub licence: &'static str,
     /// "Rue de la Loi 16" rather than "16 Rue de la Loi" in `name`.
     pub number_after_street: bool,
+    /// Build the CEDEX table into the index ([`crate::cedex`]).
+    pub cedex: bool,
 }
 
 struct Defaults {
@@ -45,6 +47,7 @@ struct Defaults {
     attribution: &'static str,
     licence: &'static str,
     number_after_street: bool,
+    cedex: bool,
 }
 
 fn defaults(code: &str) -> Option<Defaults> {
@@ -58,6 +61,7 @@ fn defaults(code: &str) -> Option<Defaults> {
             attribution: "BAN",
             licence: "ETALAB-2.0",
             number_after_street: false,
+            cedex: true,
         },
         "lu" => Defaults {
             source: Source::Lu,
@@ -67,6 +71,7 @@ fn defaults(code: &str) -> Option<Defaults> {
             attribution: "BD-Adresses, Administration du cadastre et de la topographie",
             licence: "CC0-1.0",
             number_after_street: false,
+            cedex: false,
         },
         "be" => Defaults {
             source: Source::Be,
@@ -79,6 +84,7 @@ fn defaults(code: &str) -> Option<Defaults> {
             attribution: "BeST Address, SPF BOSA",
             licence: "CC-BY-4.0",
             number_after_street: true,
+            cedex: false,
         },
         _ => return None,
     })
@@ -181,6 +187,7 @@ impl Config {
                 attribution: d.attribution,
                 licence: d.licence,
                 number_after_street: d.number_after_street,
+                cedex: d.cedex,
             });
         }
         let first = out.first().ok_or(ConfigError::Empty)?.code.clone();

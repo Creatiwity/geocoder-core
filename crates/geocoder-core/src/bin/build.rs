@@ -65,7 +65,7 @@ fn main() -> Result<(), GeocoderError> {
         }
     }
 
-    let result = import_files(&files, source, profile, &output, |p| {
+    let result = import_files(&files, source, profile, &output, None, |p| {
         eprintln!(
             "{} lines, {} indexed, {:?}",
             p.lines, p.documents, p.elapsed

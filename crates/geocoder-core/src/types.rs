@@ -35,4 +35,11 @@ pub struct SearchResult {
     pub lat: f64,
     pub lon: f64,
     pub distance_km: Option<f64>,
+    /// The delivery line of the query (CEDEX), as written: the place was
+    /// searched, the line is given back.
+    pub postal: Option<crate::profile::PostalLine>,
+    /// The address as it should be written for mail: the street part of the
+    /// label, then the delivery line ("1 Avenue du Général de Gaulle 92074
+    /// PARIS LA DEFENSE CEDEX"). Only with `postal`.
+    pub postal_label: Option<String>,
 }

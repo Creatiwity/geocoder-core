@@ -21,6 +21,39 @@ use std::sync::Arc;
 use crate::doc::Document;
 use crate::text::{Synonyms, Token, tokenize};
 
+/// A delivery line of the query, given back with the results as the user
+/// wrote it, normalized: "92074 PARIS LA DEFENSE CEDEX 12". An address
+/// checked by the geocoder keeps it, even when the code is unknown.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PostalLine {
+    pub code: Option<String>,
+    /// "PARIS LA DEFENSE CEDEX 12".
+    pub label: String,
+}
+
+impl PostalLine {
+    /// The whole line: code and label.
+    pub fn line(&self) -> String {
+        match &self.code {
+            Some(code) => format!("{code} {}", self.label),
+            None => self.label.clone(),
+        }
+    }
+}
+
+/// A delivery line found in a query ([`Profile::postal`]), and where the
+/// place it stands for is.
+#[derive(Debug, Clone)]
+pub struct Postal {
+    pub line: PostalLine,
+    /// Where the line is in the raw query: replaced before searching.
+    pub range: std::ops::Range<usize>,
+    /// The place named by the line, without the delivery words ("PARIS LA
+    /// DEFENSE"): looked up in the index's CEDEX table, searched when
+    /// nothing better is known.
+    pub locality: String,
+}
+
 /// How much a field weighs in the token → document boost.
 #[derive(Debug, Clone, Copy)]
 pub enum Boost {
@@ -116,6 +149,13 @@ pub trait Profile: Send + Sync {
     /// folded query only, before tokenizing.
     fn process_query(&self, query: &str) -> String {
         query.to_string()
+    }
+
+    /// A delivery line of the raw query that is not a place (France: CEDEX),
+    /// searched as the place it stands for and given back with the results.
+    /// Not part of addok: `None` by default.
+    fn postal(&self, _query: &str) -> Option<Postal> {
+        None
     }
 
     /// addok's `PROCESSORS` after `tokenize` and `normalize`, run on index
