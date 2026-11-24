@@ -9,7 +9,7 @@
 mod error;
 mod geojson;
 mod search;
-mod trace;
+pub mod trace;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -181,6 +181,9 @@ pub fn app(context: Arc<Context>) -> Router {
         .merge(Scalar::with_url("/scalar", api))
         .layer(cors_layer())
         .layer(tower_http::compression::CompressionLayer::new())
+        // Inside the Sentry transaction, the route matched; the Sentry layer
+        // skips this span.
+        .layer(axum::middleware::from_fn(trace::otel_request))
         .layer(tower_http::trace::TraceLayer::new_for_http().on_failure(on_failure))
         .layer(SentryHttpLayer::new().enable_transaction())
         .layer(axum::middleware::from_fn(trace::client_context))
@@ -322,9 +325,9 @@ mod tests {
         static SUBSCRIBER: std::sync::Once = std::sync::Once::new();
         SUBSCRIBER.call_once(|| {
             // Global: the blocking thread does not see a thread-local one.
-            #[allow(deprecated)]
-            let layer = sentry::integrations::tracing::layer();
-            tracing_subscriber::registry().with(layer).init();
+            tracing_subscriber::registry()
+                .with(crate::telemetry::sentry_layer())
+                .init();
         });
         let transport = sentry::test::TestTransport::new();
         let mut options = sentry::ClientOptions::new().traces_sample_rate(1.0);
@@ -363,6 +366,17 @@ mod tests {
         for op in ["geocoder.search", "geocoder.collect", "geocoder.rank"] {
             assert!(ops.contains(&op), "{op} missing from {ops:?}");
         }
+        // The OpenTelemetry request span stays out of Sentry.
+        assert!(
+            transactions[0]
+                .spans
+                .iter()
+                .all(
+                    |s| s.description.as_deref() != Some(trace::OTEL_REQUEST_SPAN)
+                        && s.op.as_deref() != Some(trace::OTEL_REQUEST_SPAN)
+                ),
+            "{ops:?}"
+        );
         let search = transactions[0]
             .spans
             .iter()
