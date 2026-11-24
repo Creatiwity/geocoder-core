@@ -54,8 +54,8 @@ secrets:
 # (plus the standard OTEL_* variables) to export the same spans and the logs
 # over OTLP (OTEL_LOGS_EXPORTER=none: spans only; OTEL_TRACES_SAMPLER=
 # parentbased_traceidratio with OTEL_TRACES_SAMPLER_ARG=0.1 to sample them,
-# all by default), LOG_FORMAT for stdout (text, json or none; keep it for
-# `kubectl logs`).
+# all by default), LOG_FORMAT for the console logs on stderr (text, json or
+# none; keep them for `kubectl logs`).
 envFrom: []
 extraEnv: []
 
