@@ -77,11 +77,7 @@ pub fn init() {
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(stdout)
-        // Same layer as siren; its replacement is not settled yet.
-        .with(
-            #[allow(deprecated)]
-            sentry::integrations::tracing::layer(),
-        )
+        .with(sentry_layer())
         .with(traces)
         .with(logs)
         .init();
@@ -100,6 +96,23 @@ pub fn init() {
         on(otlp.is_some_and(|o| o.logs.is_some())),
         format.unwrap_or(LogFormat::Text),
     );
+}
+
+/// Spans and events to Sentry, like siren (its replacement is not settled
+/// yet). The OpenTelemetry request span is left out: `SentryHttpLayer`
+/// already makes the request's transaction.
+pub fn sentry_layer<S>() -> impl Layer<S>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    #[allow(deprecated)]
+    sentry::integrations::tracing::layer().span_filter(|meta| {
+        meta.name() != crate::api::trace::OTEL_REQUEST_SPAN
+            && matches!(
+                *meta.level(),
+                tracing::Level::ERROR | tracing::Level::WARN | tracing::Level::INFO
+            )
+    })
 }
 
 /// The crates the exporters use: their own logs, exported, would feed the

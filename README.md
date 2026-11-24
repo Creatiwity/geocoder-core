@@ -181,7 +181,12 @@ The image is [`creatiwity/geocoder-api`](https://hub.docker.com/r/creatiwity/geo
   and the Crons check-ins of the `update` CronJob (monitor
   `geocoder-update`). A W3C `traceparent` joins the caller's trace.
   `OTEL_EXPORTER_OTLP_ENDPOINT` exports the same spans and the logs over
-  OTLP, each log with its trace (`OTEL_LOGS_EXPORTER=none`: spans only).
+  OTLP, each log with its trace (`OTEL_LOGS_EXPORTER=none`: spans only);
+  there too a request joins the caller's `traceparent`. Sampling is set on
+  each side: `SENTRY_TRACES_SAMPLE_RATE` for Sentry, the standard
+  `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` for OTLP (e.g.
+  `parentbased_traceidratio` and `0.1`, which follows the caller's
+  decision; all traces by default). Logs are not sampled.
   `LOG_FORMAT` sets stdout: `text` (default), `json` or `none`.
 - **A single host**: [Docker Compose](deploy/compose) with Caddy (HTTPS)
   and a cron line for the updates.
