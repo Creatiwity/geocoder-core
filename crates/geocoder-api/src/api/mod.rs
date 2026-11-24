@@ -25,7 +25,8 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use sentry::integrations::tower::{NewSentryLayer, SentryHttpLayer};
 use serde::Serialize;
-use tracing::info;
+use tower_http::classify::ServerErrorsFailureClass;
+use tracing::{error, info, warn};
 use utoipa::{OpenApi, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -147,6 +148,18 @@ async fn ready(State(context): State<Arc<Context>>) -> Response {
     )
 }
 
+/// A 503 is expected while an index is not built yet: a warning, one per
+/// request. Other server errors stay errors.
+fn on_failure(class: ServerErrorsFailureClass, latency: Duration, _span: &tracing::Span) {
+    let latency = latency.as_millis();
+    match class {
+        ServerErrorsFailureClass::StatusCode(StatusCode::SERVICE_UNAVAILABLE) => {
+            warn!(latency_ms = latency, "response unavailable (503)")
+        }
+        class => error!(latency_ms = latency, "response failed: {class}"),
+    }
+}
+
 pub fn app(context: Arc<Context>) -> Router {
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(search::search))
@@ -168,7 +181,7 @@ pub fn app(context: Arc<Context>) -> Router {
         .merge(Scalar::with_url("/scalar", api))
         .layer(cors_layer())
         .layer(tower_http::compression::CompressionLayer::new())
-        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(tower_http::trace::TraceLayer::new_for_http().on_failure(on_failure))
         .layer(SentryHttpLayer::new().enable_transaction())
         .layer(axum::middleware::from_fn(trace::client_context))
         .layer(NewSentryLayer::new_from_top())
