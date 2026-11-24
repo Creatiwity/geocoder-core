@@ -3,6 +3,7 @@
 use axum::extract::MatchedPath;
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::{extract::Request, middleware::Next, response::Response};
+use opentelemetry::Context;
 use opentelemetry::propagation::{Extractor, TextMapPropagator};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use sentry::protocol::{SpanId, TraceId, User};
@@ -34,7 +35,10 @@ pub async fn otel_request(request: Request, next: Next) -> Response {
             http.response.status_code = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
         );
-        let parent = TraceContextPropagator::new().extract(&Headers(request.headers()));
+        // From an empty context: without traceparent, a trace of its own,
+        // whatever span the server runs in.
+        let parent = TraceContextPropagator::new()
+            .extract_with_context(&Context::new(), &Headers(request.headers()));
         // Fails only without an OpenTelemetry layer: nothing to join then.
         let _ = span.set_parent(parent);
         span
