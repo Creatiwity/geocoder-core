@@ -7,9 +7,10 @@
 //!   variables): the same spans and the logs, exported over OTLP/HTTP. A log
 //!   carries the trace and span it was written in. `OTEL_LOGS_EXPORTER=none`
 //!   keeps the logs out of it.
-//! - stdout (`LOG_FORMAT`): `text` (default), `json`, or `none` when the OTLP
-//!   export is enough. Keep it on in Kubernetes: `kubectl logs` reads it, and
-//!   it still works when the collector does not.
+//! - the console (`LOG_FORMAT`): `text` (default), `json`, or `none` when the
+//!   OTLP export is enough. Keep it on in Kubernetes: `kubectl logs` reads
+//!   it, and it still works when the collector does not. On stderr: stdout
+//!   is the output of `keygen` and `public-key`, read by scripts.
 
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -29,7 +30,7 @@ use tracing_subscriber::{Layer, prelude::*};
 
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The stdout output of the logs.
+/// The console output of the logs (stderr).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
     Text,
@@ -58,8 +59,8 @@ struct Otlp {
 /// Kept for [`exit`], which cannot reach the providers otherwise.
 static OTLP: OnceLock<Otlp> = OnceLock::new();
 
-/// Sets the global subscriber: stdout, Sentry, and OTLP when an endpoint is
-/// configured. Needs a Tokio runtime (batch export).
+/// Sets the global subscriber: the console, Sentry, and OTLP when an endpoint
+/// is configured. Needs a Tokio runtime (batch export).
 pub fn init() {
     let format = LogFormat::parse(std::env::var("LOG_FORMAT").ok().as_deref());
     let otlp = init_otlp();
@@ -69,14 +70,15 @@ pub fn init() {
         OpenTelemetryTracingBridge::new(provider)
             .with_filter(filter_fn(|meta| !is_exporter_target(meta.target())))
     });
-    let stdout = match format.clone().unwrap_or(LogFormat::Text) {
-        LogFormat::Text => Some(tracing_subscriber::fmt::layer().boxed()),
-        LogFormat::Json => Some(tracing_subscriber::fmt::layer().json().boxed()),
+    let console = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+    let console = match format.clone().unwrap_or(LogFormat::Text) {
+        LogFormat::Text => Some(console.boxed()),
+        LogFormat::Json => Some(console.json().boxed()),
         LogFormat::None => None,
     };
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .with(stdout)
+        .with(console)
         .with(sentry_layer())
         .with(traces)
         .with(logs)

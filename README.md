@@ -216,7 +216,8 @@ The image is [`creatiwity/geocoder-api`](https://hub.docker.com/r/creatiwity/geo
   `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` for OTLP (e.g.
   `parentbased_traceidratio` and `0.1`, which follows the caller's
   decision; all traces by default). Logs are not sampled.
-  `LOG_FORMAT` sets stdout: `text` (default), `json` or `none`.
+  `LOG_FORMAT` sets the console logs (stderr): `text` (default), `json` or
+  `none`.
 - **A single host**: [Docker Compose](deploy/compose) with Caddy (HTTPS)
   and a cron line for the updates.
 
