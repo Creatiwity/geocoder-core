@@ -1114,7 +1114,7 @@ dependencies = [
 
 [[package]]
 name = "geocoder-api"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "axum",
  "chrono",
@@ -1147,7 +1147,7 @@ dependencies = [
 
 [[package]]
 name = "geocoder-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "byteorder",
  "csv",

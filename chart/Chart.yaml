@@ -3,6 +3,6 @@ name: geocoder-api
 description: Address geocoding API (France, Luxembourg, Belgium), compatible with the French BAN API
 type: application
 # Chart version, bumped on every change of the chart.
-version: 0.4.0
+version: 0.4.1
 # Image tag by default.
-appVersion: "v0.4.0"
+appVersion: "v0.4.1"
